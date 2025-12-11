@@ -211,7 +211,7 @@
     <p class="lead">规则自动来自 ios_rule_script；为每个分类选择“解析到的 IP”，或转发到上游 DNS。</p>
   </header>
   <main>
-    <form method="POST" action="save_upstreams" style="display:contents;">
+    <form method="POST" action="save_upstreams?${token_query}" style="display:contents;">
       <section class="card">
         <h2>IP / 上游 DNS 池</h2>
         <div class="chip-bar">
@@ -355,12 +355,12 @@
 
     document.getElementById('refresh-ipinfo')?.addEventListener('click', () => refreshIpMeta(true));
 
-    const form = document.querySelector('form[action="save_upstreams"]');
+    const form = document.querySelector('form[action="save_upstreams?${token_query}"]');
     form.addEventListener('submit', e => e.preventDefault());
 
     async function postParams(params) {
       try {
-        await fetch('./save_upstreams', {
+        await fetch('./save_upstreams?${token_query}', {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
           body: params.toString(),
@@ -398,15 +398,6 @@
       postParams(p);
     }
 
-    // 分类下拉变更即自动保存
-    document.querySelectorAll('select[name^="sel_"]').forEach(sel => {
-      sel.addEventListener('change', () => {
-        const p = new URLSearchParams();
-        p.set(sel.name, sel.value);
-        postParams(p);
-      });
-    });
-
     // IP 探测：初始用后端缓存，避免每次打开都请求
     const initialIpMeta = ${ip_meta_json};
     if (initialIpMeta && Object.keys(initialIpMeta).length) {
@@ -420,7 +411,7 @@
     const initialRulesTs = Number('${loaded_at_ts}');
     async function pollRules(tsBefore) {
       try {
-        const res = await fetch('./api/rules_info');
+        const res = await fetch('./api/rules_info?${token_query}');
         const info = await res.json();
         if (!info.reloading && info.rules_loaded_at && info.rules_loaded_at > tsBefore) {
           location.reload();
@@ -432,7 +423,7 @@
     rulesBtn?.addEventListener('click', async () => {
       showToast('后台刷新规则中...');
       try {
-        await fetch('./refresh_rules', {method: 'POST'});
+        await fetch('./refresh_rules?${token_query}', {method: 'POST'});
       } catch (_) {}
       pollRules(initialRulesTs || 0);
     });
@@ -474,7 +465,7 @@
       }
       chips.forEach(chip => {
         const ip = chip.dataset.ip;
-        fetch(`api/ipinfo?ip=${encodeURIComponent(ip)}${force ? '&refresh=1' : ''}`)
+        fetch(`./api/ipinfo?${token_query}&ip=${encodeURIComponent(ip)}${force ? '&refresh=1' : ''}`)
           .then(r => r.json())
           .then(data => applyIpMeta(ip, data))
           .catch(() => applyIpMeta(ip, {ok:false}));

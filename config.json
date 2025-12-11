@@ -1,9 +1,10 @@
 {
   "listen_host": "0.0.0.0",
   "web_host": "0.0.0.0",
-  "dns_port": 5353,
+  "dns_port": 53,
   "web_port": 22004,
   "timeout_ms": 2000,
+  "token": "axfswdgbby20",
   "upstream_dns": "1.1.1.1",
   "ip_pool": [
     "22.22.22.10",
@@ -27,9 +28,9 @@
     },
     "ai": {
       "_default": "22.22.22.10",
-      "openai": "22.22.22.12",
-      "gemini": "22.22.22.15",
-      "claude": "22.22.22.12",
+      "openai": "22.22.22.11",
+      "gemini": "22.22.22.12",
+      "claude": "22.22.22.11",
       "copilot": "22.22.22.16",
       "perplexity": "__upstream__",
       "grok": "__upstream__",
@@ -40,7 +41,7 @@
     },
     "streaming": {
       "_default": "22.22.22.10",
-      "youtube": "__upstream__",
+      "youtube": "22.22.22.11",
       "netflix": "22.22.22.13",
       "disney": "__upstream__",
       "hbo": "__upstream__",

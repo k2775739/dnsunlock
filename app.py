@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     "dns_port": 5353,
     "web_port": 8080,
     "timeout_ms": 2000,
+    "token": "changeme",
     "upstream_dns": "8.8.8.8",
     "upstream_dns_pool": ["1.1.1.1", "8.8.8.8"],
     "ip_pool": ["1.1.1.1", "8.8.8.8", "9.9.9.9"],
@@ -276,6 +277,9 @@ def ensure_config():
     for k, v in DEFAULT_CONFIG.items():
         if k not in cfg:
             cfg[k] = v
+    # token ensure non-empty
+    if not cfg.get("token"):
+        cfg["token"] = DEFAULT_CONFIG["token"]
     # Normalize upstream_dns_pool
     udp = cfg.get("upstream_dns_pool")
     if isinstance(udp, str):
@@ -630,10 +634,24 @@ class WebHandler(BaseHTTPRequestHandler):
     def cfg(self) -> ConfigManager:
         return self.server.config  # type: ignore
 
+    def _check_token(self, qs) -> bool:
+        token_cfg = self.cfg.config.get("token", "")
+        token_req = None
+        if isinstance(qs, dict):
+            token_req = qs.get("token", [None])[0]
+        if not token_req:
+            token_req = self.headers.get("X-Token")
+        if token_cfg and token_req == token_cfg:
+            return True
+        self._send(403, b"Forbidden: token missing or invalid", "text/plain; charset=utf-8")
+        return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
         qs = parse_qs(parsed.query)
+        if not self._check_token(qs):
+            return
         if path.endswith("api/config"):
             body, _ = self.cfg.get_snapshot()
             return self._send(200, body, "application/json")
@@ -658,6 +676,9 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/")
+        qs = parse_qs(urlparse(self.path).query)
+        if not self._check_token(qs):
+            return
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length).decode("utf-8")
         data = parse_qs(raw)
@@ -730,8 +751,8 @@ class WebHandler(BaseHTTPRequestHandler):
             resp = {"started": started}
             self._send(202 if started else 200, json.dumps(resp).encode("utf-8"), "application/json")
             return
-        self.send_response(303)
-        self.send_header("Location", "/")
+        # 默认返回 204，避免浏览器自动重定向到根路径（可能丢失 token）
+        self.send_response(204)
         self.end_headers()
 
     def render_dashboard(self) -> str:
@@ -741,6 +762,7 @@ class WebHandler(BaseHTTPRequestHandler):
         upstream_dns = cfg.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
         upstream_pool = cfg.get("upstream_dns_pool", [upstream_dns])
         ip_meta = self.cfg.get_ip_meta(force=False)
+        token = cfg.get("token", "")
         rule_counts = cfg.get("rule_counts", {})
         service_counts = cfg.get("service_counts", {})
         rules_root = cfg.get("rules_root", "rules")
@@ -801,6 +823,8 @@ class WebHandler(BaseHTTPRequestHandler):
             upstream_dns=upstream_dns,
             loaded_at_ts=str(int(loaded_at_raw)),
             ip_meta_json=json.dumps(ip_meta),
+            token=token,
+            token_query=f"token={token}",
         )
 
 

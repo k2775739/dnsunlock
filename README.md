@@ -8,7 +8,7 @@
 python3 app.py
 ```
 
-- 默认 DNS 监听 `0.0.0.0:5353`，Web 面板 `0.0.0.0:8080`（本机可用 `http://127.0.0.1:8080` 打开）
+- 默认 DNS 监听 `0.0.0.0:5353`，Web 面板 `0.0.0.0:8080`（本机可用 `http://127.0.0.1:8080/?token=你的口令` 打开）
 - 如需监听 53 端口需以 root 权限运行并修改 `config.json` 中的 `dns_port`
 
 ## 功能
@@ -20,10 +20,11 @@ python3 app.py
 
 ## 面板入口
 
-浏览器打开 `http://127.0.0.1:8080`。
+浏览器打开 `http://127.0.0.1:8080/?token=你的口令`。
 
 ## 目录
 
 - `app.py` 主程序（DNS + Web）
 - `config.json` 默认配置，可手工编辑或通过面板修改（含上游 DNS）
 - `rules/` 建议放置 `blackmatrix7/ios_rule_script` 仓库（或其 `rule/Clash` 子目录的链接/拷贝）
+- `token`：在 `config.json` 中设置，用于保护 Web 面板和所有接口。所有请求必须携带 `token`，可通过 URL 参数 `?token=xxx` 或请求头 `X-Token: xxx`。
