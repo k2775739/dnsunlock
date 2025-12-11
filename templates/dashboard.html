@@ -360,7 +360,7 @@
 
     async function postParams(params) {
       try {
-        await fetch('save_upstreams', {
+        await fetch('./save_upstreams', {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
           body: params.toString(),
@@ -407,12 +407,20 @@
       });
     });
 
+    // IP 探测：初始用后端缓存，避免每次打开都请求
+    const initialIpMeta = ${ip_meta_json};
+    if (initialIpMeta && Object.keys(initialIpMeta).length) {
+      Object.entries(initialIpMeta).forEach(([ip, info]) => applyIpMeta(ip, info));
+    } else {
+      refreshIpMeta(true);
+    }
+
     // 规则后台刷新：发起后轮询状态，成功再刷新页面
     const rulesBtn = document.getElementById('refresh-rules-btn');
     const initialRulesTs = Number('${loaded_at_ts}');
     async function pollRules(tsBefore) {
       try {
-        const res = await fetch('api/rules_info');
+        const res = await fetch('./api/rules_info');
         const info = await res.json();
         if (!info.reloading && info.rules_loaded_at && info.rules_loaded_at > tsBefore) {
           location.reload();
@@ -424,7 +432,7 @@
     rulesBtn?.addEventListener('click', async () => {
       showToast('后台刷新规则中...');
       try {
-        await fetch('refresh_rules', {method: 'POST'});
+        await fetch('./refresh_rules', {method: 'POST'});
       } catch (_) {}
       pollRules(initialRulesTs || 0);
     });
@@ -449,6 +457,7 @@
         const parts = [];
         if (info.country_iso) parts.push(info.country_iso);
         if (info.asn_org) parts.push(info.asn_org);
+        if (info.real_ip && info.real_ip !== ip) parts.push(info.real_ip);
         const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
         chip.textContent = `${ip}${extra}`;
       } else {

@@ -740,6 +740,7 @@ class WebHandler(BaseHTTPRequestHandler):
         active = cfg.get("active_service", {})
         upstream_dns = cfg.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
         upstream_pool = cfg.get("upstream_dns_pool", [upstream_dns])
+        ip_meta = self.cfg.get_ip_meta(force=False)
         rule_counts = cfg.get("rule_counts", {})
         service_counts = cfg.get("service_counts", {})
         rules_root = cfg.get("rules_root", "rules")
@@ -799,6 +800,7 @@ class WebHandler(BaseHTTPRequestHandler):
             loaded_at=loaded_at,
             upstream_dns=upstream_dns,
             loaded_at_ts=str(int(loaded_at_raw)),
+            ip_meta_json=json.dumps(ip_meta),
         )
 
 
