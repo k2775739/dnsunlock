@@ -477,6 +477,11 @@ class ConfigManager:
             self.ip_meta_fetched_at = time.time()
         return meta
 
+    def peek_ip_meta(self):
+        """Return cached ip meta without triggering fetch."""
+        with self.lock:
+            return dict(self.ip_meta_cache)
+
     def get_ip_meta_one(self, ip: str, force=False):
         """Return meta for single ip, caching with 10min TTL unless force."""
         now = time.time()
@@ -761,7 +766,8 @@ class WebHandler(BaseHTTPRequestHandler):
         active = cfg.get("active_service", {})
         upstream_dns = cfg.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
         upstream_pool = cfg.get("upstream_dns_pool", [upstream_dns])
-        ip_meta = self.cfg.get_ip_meta(force=False)
+        # 仅读取缓存，不触发远程获取，避免首屏阻塞
+        ip_meta = self.cfg.peek_ip_meta()
         token = cfg.get("token", "")
         rule_counts = cfg.get("rule_counts", {})
         service_counts = cfg.get("service_counts", {})

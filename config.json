@@ -28,9 +28,9 @@
     },
     "ai": {
       "_default": "22.22.22.10",
-      "openai": "22.22.22.11",
+      "openai": "22.22.22.15",
       "gemini": "22.22.22.12",
-      "claude": "22.22.22.11",
+      "claude": "22.22.22.14",
       "copilot": "22.22.22.16",
       "perplexity": "__upstream__",
       "grok": "__upstream__",

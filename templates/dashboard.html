@@ -51,6 +51,8 @@
       outline: none;
       transition: border 0.2s ease, box-shadow 0.2s ease;
     }
+    select option.ok { color: #0f7b31; }
+    select option.fail { color: #c70000; }
     textarea {
       min-height: 120px;
       resize: vertical;
@@ -398,12 +400,12 @@
       postParams(p);
     }
 
-    // IP 探测：初始用后端缓存，避免每次打开都请求
+    // IP 探测：优先使用后端缓存；若无缓存则页面加载完后再异步刷新，避免首屏阻塞
     const initialIpMeta = ${ip_meta_json};
     if (initialIpMeta && Object.keys(initialIpMeta).length) {
       Object.entries(initialIpMeta).forEach(([ip, info]) => applyIpMeta(ip, info));
     } else {
-      refreshIpMeta(true);
+      window.addEventListener('load', () => setTimeout(() => refreshIpMeta(true), 300));
     }
 
     // 规则后台刷新：发起后轮询状态，成功再刷新页面
@@ -440,27 +442,55 @@
 
     // ---- IP健康探测 ----
     function applyIpMeta(ip, info) {
+      // 更新 IP 池芯片
       const chip = document.querySelector(`#chip-list-ip .chip[data-ip="${ip}"]`);
-      if (!chip) return;
-      chip.classList.remove('ok','fail');
-      if (info && info.ok) {
-        chip.classList.add('ok');
-        const parts = [];
-        if (info.country_iso) parts.push(info.country_iso);
-        if (info.asn_org) parts.push(info.asn_org);
-        if (info.real_ip && info.real_ip !== ip) parts.push(info.real_ip);
-        const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
-        chip.textContent = `${ip}${extra}`;
-      } else {
-        chip.classList.add('fail');
-        chip.textContent = `${ip} · 未连通`;
+      if (chip) {
+        chip.classList.remove('ok','fail');
+        if (info && info.ok) {
+          chip.classList.add('ok');
+          const parts = [];
+          if (info.country_iso) parts.push(info.country_iso);
+          if (info.asn_org) parts.push(info.asn_org);
+          if (info.real_ip && info.real_ip !== ip) parts.push(info.real_ip);
+          const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
+          chip.textContent = `${ip}${extra}`;
+        } else {
+          chip.classList.add('fail');
+          chip.textContent = `${ip}· 错误`;
+        }
       }
+      // 同步更新所有下拉选项的显示与颜色
+      document.querySelectorAll(`select option[value="${ip}"]`).forEach(opt => {
+        if (opt.value === "__upstream__") return;
+        const GREEN = '#0f7b31';
+        const RED = '#c70000';
+        if (info && info.ok && info.country_iso) {
+          opt.textContent = `${ip} · ${info.country_iso}`;
+          opt.classList.add('ok');
+          opt.classList.remove('fail');
+          opt.style.color = GREEN;
+          if (opt.selected && opt.parentElement && opt.parentElement.tagName === 'SELECT') {
+            opt.parentElement.style.color = GREEN;
+          }
+        } else {
+          opt.textContent = `${ip}· 错误`;
+          opt.classList.add('fail');
+          opt.classList.remove('ok');
+          opt.style.color = RED;
+          if (opt.selected && opt.parentElement && opt.parentElement.tagName === 'SELECT') {
+            opt.parentElement.style.color = RED;
+          }
+        }
+      });
     }
 
     async function refreshIpMeta(force=false) {
       const chips = Array.from(document.querySelectorAll('#chip-list-ip .chip'));
       if (force) {
-        chips.forEach(c => { c.classList.remove('ok','fail'); c.textContent = `${c.dataset.ip} · 探测中`; });
+        chips.forEach(c => {
+          c.classList.remove('ok','fail');
+          c.textContent = `${c.dataset.ip} · 探测中`;
+        });
         showToast('正在刷新 IP 探测...');
       }
       chips.forEach(chip => {
