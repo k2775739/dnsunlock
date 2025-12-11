@@ -28,8 +28,8 @@
     "ai": {
       "_default": "22.22.22.10",
       "openai": "22.22.22.12",
-      "gemini": "22.22.22.14",
-      "claude": "22.22.22.10",
+      "gemini": "22.22.22.15",
+      "claude": "22.22.22.12",
       "copilot": "22.22.22.16",
       "perplexity": "__upstream__",
       "grok": "__upstream__",

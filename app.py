@@ -12,8 +12,8 @@ import os
 import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 from typing import Optional, Tuple
 from string import Template
 from pathlib import Path
@@ -217,7 +217,7 @@ def load_rules_from_repo(root: str):
         rules_sorted[cat] = {svc: sorted(list(domains)) for svc, domains in svc_dict.items()}
     return rules_sorted, domain_map
 
-def fetch_ip_meta(ip: str, timeout: float = 3.0) -> dict:
+def fetch_ip_meta(ip: str, timeout: float = 6.0) -> dict:
     """Use curl with --resolve to query ifconfig.co/json via the target IP.
     Returns dict: {ok: bool, ip: str, country_iso: str|None, asn_org: str|None, real_ip: str|None}
     """
@@ -227,7 +227,7 @@ def fetch_ip_meta(ip: str, timeout: float = 3.0) -> dict:
         "curl",
         "--resolve", f"ifconfig.co:80:{ip}",
         "-m", str(int(timeout)),
-        "--connect-timeout", "2",
+        "--connect-timeout", "3",
         "-s",
         "http://ifconfig.co/json",
     ]
@@ -473,6 +473,19 @@ class ConfigManager:
             self.ip_meta_fetched_at = time.time()
         return meta
 
+    def get_ip_meta_one(self, ip: str, force=False):
+        """Return meta for single ip, caching with 10min TTL unless force."""
+        now = time.time()
+        with self.lock:
+            age = now - self.ip_meta_fetched_at
+            if not force and age < 600 and ip in self.ip_meta_cache:
+                return self.ip_meta_cache[ip]
+        meta = fetch_ip_meta(ip)
+        with self.lock:
+            self.ip_meta_cache[ip] = meta
+            self.ip_meta_fetched_at = now
+        return meta
+
 
 # ---------- DNS plumbing ----------
 def parse_question(packet: bytes) -> Tuple[str, int, int, int]:
@@ -618,12 +631,19 @@ class WebHandler(BaseHTTPRequestHandler):
         return self.server.config  # type: ignore
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0].rstrip("/")
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        qs = parse_qs(parsed.query)
         if path.endswith("api/config"):
             body, _ = self.cfg.get_snapshot()
             return self._send(200, body, "application/json")
         if path.endswith("api/ipinfo"):
-            meta = self.cfg.get_ip_meta(force="refresh" in self.path)
+            ip = qs.get("ip", [None])[0]
+            force = "refresh" in qs
+            if ip:
+                meta = self.cfg.get_ip_meta_one(ip, force=force)
+            else:
+                meta = self.cfg.get_ip_meta(force=force)
             return self._send(200, json.dumps(meta).encode("utf-8"), "application/json")
         if path.endswith("api/rules_info"):
             _, snap = self.cfg.get_snapshot()
@@ -801,7 +821,8 @@ def run_servers():
     )
     dns_thread.start()
 
-    class WebServer(HTTPServer):
+    class WebServer(ThreadingHTTPServer):
+        daemon_threads = True
         def __init__(self, server_address, handler_class):
             super().__init__(server_address, handler_class)
             self.config = cfg_mgr
