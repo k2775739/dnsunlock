@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DNSUnlock 控制台</title>
+  <style>
+    :root {
+      --bg: #f5f6f8;
+      --card: rgba(255,255,255,0.72);
+      --border: #e5e6ea;
+      --text: #0f1222;
+      --muted: #5b6173;
+      --accent: #007aff;
+      --shadow: 0 20px 60px rgba(0,0,0,0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 20%, #e8f0ff, #f9fbff 40%), var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header { padding: 32px 4vw 12px; }
+    h1 { margin: 0; font-weight: 700; letter-spacing: -0.02em; }
+    p.lead { margin: 6px 0 0; color: var(--muted); }
+    main {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 18px;
+      padding: 12px 4vw 36px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 18px 18px 14px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+    h2 { margin: 6px 0 12px; font-size: 18px; letter-spacing: -0.01em; }
+    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    textarea, select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-size: 14px;
+      background: rgba(255,255,255,0.9);
+      outline: none;
+      transition: border 0.2s ease, box-shadow 0.2s ease;
+    }
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    }
+    textarea:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(0,122,255,0.15);
+    }
+    .btn {
+      margin-top: 10px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 14px;
+      background: linear-gradient(120deg, #0f7bff, #4ab2ff);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 10px 30px rgba(15,123,255,0.25);
+      transition: transform 0.1s ease, box-shadow 0.1s ease;
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(15,123,255,0.28); }
+    .pill {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: #eef3ff;
+      color: #2f64d6;
+      font-size: 12px;
+      margin-left: 8px;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+    }
+    .chip-bar {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 10px 12px 6px;
+      background: rgba(255,255,255,0.9);
+    }
+    .chip-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .chip-actions { display:flex; gap:6px; }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 8px 0 4px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 12px;
+      border-radius: 14px;
+      background: #eef3ff;
+      color: #2f64d6;
+      font-size: 13px;
+      border: 1px solid #d6e3ff;
+      transition: all 0.15s ease;
+      cursor: default;
+      position: relative;
+    }
+    .chip.ok {
+      background: #e6f7ed;
+      border-color: #b7e4c7;
+      color: #0f7b31;
+    }
+    .chip.fail {
+      background: #ffecec;
+      border-color: #ffb3b3;
+      color: #c70000;
+    }
+    .chips.editing .chip { cursor: pointer; }
+    .chip.selected {
+      background: #ffd8d8;
+      border-color: #ff9b9b;
+      color: #b20000;
+    }
+    .chip.active {
+      background: #dff3ff;
+      border-color: #8bc7ff;
+      color: #0b5ea8;
+      box-shadow: 0 4px 14px rgba(11,94,168,0.18);
+    }
+    .chip::after {
+      content: '';
+      position: absolute;
+      top: 6px; right: 6px;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: transparent;
+    }
+    .chips.editing .chip::after { background: #ff9b9b; }
+    .ghost-btn {
+      padding: 6px 10px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: #f7f8fb;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 13px;
+      margin-left: 6px;
+    }
+    .ghost-btn.danger { border-color: #ffb3b3; color: #b20000; }
+    .row { margin-bottom: 10px; }
+    .row-head { display:flex; justify-content:space-between; align-items:center; font-size:13px; color:var(--text); margin-bottom:6px; }
+    .footer { padding: 0 4vw 28px; color: var(--muted); font-size: 12px; }
+    .input-row { display:flex; gap:8px; margin-top:10px; align-items:stretch; }
+    .input-row input {
+      flex:1;
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px 12px;
+      font-size:14px;
+      height:44px;
+      line-height:22px;
+    }
+.input-row .btn {
+  height:44px;
+  padding:0 16px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  flex-shrink:0;
+  margin-top:0;
+}
+    #toast {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translate(-50%, -10px);
+      background: rgba(0,0,0,0.8);
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      opacity: 0;
+      transition: all 0.35s ease;
+      pointer-events: none;
+      z-index: 9999;
+      font-size: 14px;
+      letter-spacing: 0.01em;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DNSUnlock 控制台 <span class="pill">本地运行</span></h1>
+    <p class="lead">规则自动来自 ios_rule_script；为每个分类选择“解析到的 IP”，或转发到上游 DNS。</p>
+  </header>
+  <main>
+    <form method="POST" action="/save_upstreams" style="display:contents;">
+      <section class="card">
+        <h2>IP / 上游 DNS 池</h2>
+        <div class="chip-bar">
+          <div class="chip-head">
+            <span style="color:var(--muted);font-size:13px;">IP 池（解析结果）</span>
+            <div class="chip-actions">
+              <button type="button" class="ghost-btn" id="edit-toggle-ip">编辑</button>
+              <button type="button" class="ghost-btn danger" id="delete-selected-ip" style="display:none;">删除选中</button>
+            </div>
+          </div>
+          <div class="chips" id="chip-list-ip">
+            ${ip_chips}
+          </div>
+          <div class="input-row">
+            <input name="ip_input" id="ip-input" placeholder="输入 IP 后点击添加" inputmode="numeric" pattern="^(\d{1,3}\.){3}\d{1,3}$" title="仅允许IPv4地址" />
+            <button class="btn" type="button" id="add-ip">添加</button>
+          </div>
+        </div>
+
+        <div class="chip-bar" style="margin-top:14px;">
+          <div class="chip-head">
+            <span style="color:var(--muted);font-size:13px;">上游 DNS（点选设为当前）</span>
+            <div class="chip-actions">
+              <button type="button" class="ghost-btn" id="edit-toggle-dns">编辑</button>
+              <button type="button" class="ghost-btn danger" id="delete-selected-dns" style="display:none;">删除选中</button>
+            </div>
+          </div>
+          <div class="chips" id="chip-list-dns">
+            ${dns_chips}
+          </div>
+          <div class="input-row">
+            <input name="dns_input" id="dns-input" placeholder="输入上游 DNS 后点击添加" inputmode="numeric" pattern="^(\d{1,3}\.){3}\d{1,3}$" title="仅允许IPv4地址" />
+            <button class="btn" type="button" id="add-dns">添加</button>
+          </div>
+        </div>
+        <p style="margin-top:10px;color:var(--muted);font-size:12px;">监听 DNS: ${listen_host}:${dns_port} · Web: ${web_host}:${web_port}</p>
+      </section>
+      ${category_blocks}
+    </form>
+
+    <section class="card">
+      <h2>规则状态（自动加载）</h2>
+      <p style="color:var(--muted);">来源目录: <code>${rules_root}</code></p>
+      <p style="color:var(--muted);">已加载: ${rule_summary}</p>
+      <p style="color:var(--muted);">最近刷新: ${loaded_at}</p>
+      <form method="POST" action="/refresh_rules">
+        <button class="btn" type="submit">刷新规则</button>
+      </form>
+      <p style="margin-top:8px;color:var(--muted);font-size:12px;">规则内容不在面板显示；请在本地同步/更新 blackmatrix7/ios_rule_script 后点击刷新。</p>
+    </section>
+  </main>
+  <div class="footer">DNSUnlock · 规则来自 ios_rule_script · 选择式分流</div>
+  <script>
+    // Toast
+    const toast = document.createElement('div');
+    toast.id = 'toast';
+    document.body.appendChild(toast);
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.style.opacity = '1';
+      toast.style.transform = 'translate(-50%, 0)';
+      setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translate(-50%, -10px)'; }, 3000);
+    }
+
+    window.activeUpstream = '${upstream_dns}';
+
+    function setupChipManager(prefix) {
+      const list = document.getElementById('chip-list-' + prefix);
+      const editBtn = document.getElementById('edit-toggle-' + prefix);
+      const delBtn = document.getElementById('delete-selected-' + prefix);
+      const addBtn = document.getElementById('add-' + prefix);
+      const input = document.getElementById(prefix + '-input');
+      let edit = false;
+      function setEdit(on) {
+        edit = on;
+        list.classList.toggle('editing', on);
+        delBtn.style.display = on ? 'inline-flex' : 'none';
+        editBtn.textContent = on ? '完成' : '编辑';
+        list.querySelectorAll('.chip').forEach(c => c.classList.remove('selected'));
+      }
+      editBtn.addEventListener('click', () => setEdit(!edit));
+      delBtn.addEventListener('click', () => {
+        list.querySelectorAll('.chip.selected').forEach(c => c.remove());
+        if (prefix === 'dns') {
+          if (!list.querySelector('.chip.active')) {
+            const first = list.querySelector('.chip');
+            if (first) {
+              first.classList.add('active');
+              window.activeUpstream = first.dataset.ip;
+            } else {
+              window.activeUpstream = '';
+            }
+          }
+        }
+        setEdit(false);
+        if (prefix === 'ip') {
+          submitIpPool();
+        } else {
+          submitDnsPool(true);
+        }
+      });
+      list.addEventListener('click', e => {
+        const chip = e.target.closest('.chip');
+        if (!chip) return;
+        if (edit) {
+          chip.classList.toggle('selected');
+        } else if (prefix === 'dns') {
+          list.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+          chip.classList.add('active');
+          window.activeUpstream = chip.dataset.ip;
+          submitUpstreamDnsOnly();
+        }
+      });
+      addBtn.addEventListener('click', () => {
+        const val = (input.value || '').trim();
+        if (!val) return;
+        if (!isValidIp(val)) { showToast('请输入合法IP'); return; }
+        if (![...list.querySelectorAll('.chip')].some(c => c.dataset.ip === val)) {
+          const span = document.createElement('span');
+          span.className = 'chip';
+          span.dataset.ip = val;
+          span.textContent = val;
+          if (prefix === 'dns' && !window.activeUpstream) {
+            span.classList.add('active');
+            window.activeUpstream = val;
+          }
+          list.appendChild(span);
+        }
+        input.value = '';
+        setEdit(false);
+        if (prefix === 'ip') {
+          submitIpPool();
+        } else {
+          submitDnsPool(true);
+        }
+      });
+      return () => Array.from(list.querySelectorAll('.chip')).map(c => c.dataset.ip.trim()).filter(Boolean);
+    }
+
+    const getIps = setupChipManager('ip');
+    const getDns = setupChipManager('dns');
+
+    const form = document.querySelector('form[action="/save_upstreams"]');
+    form.addEventListener('submit', e => e.preventDefault());
+
+    async function postParams(params) {
+      try {
+        await fetch('/save_upstreams', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: params.toString(),
+        });
+        showToast('已更新');
+      } catch (e) {
+        showToast('更新失败');
+      }
+    }
+
+    const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    function isValidIp(ip) {
+      if (!ipRegex.test(ip)) return false;
+      return ip.split('.').every(o => Number(o) >= 0 && Number(o) <= 255);
+    }
+
+    function submitIpPool() {
+      const p = new URLSearchParams();
+      p.set('ip_pool', getIps().join('\\n'));
+      postParams(p);
+    }
+
+    function submitDnsPool(includeActive = true) {
+      const p = new URLSearchParams();
+      p.set('upstream_dns_pool', getDns().join('\\n'));
+      if (includeActive) {
+        p.set('upstream_dns', window.activeUpstream || '${upstream_dns}');
+      }
+      postParams(p);
+    }
+
+    function submitUpstreamDnsOnly() {
+      const p = new URLSearchParams();
+      p.set('upstream_dns', window.activeUpstream || '${upstream_dns}');
+      postParams(p);
+    }
+
+    // 仅更新当前变动：下拉改变 -> 只发该项；DNS激活 -> 只发upstream_dns；
+    // IP/DNS池增删 -> 只发对应池（DNS池还会带上当前上游）。
+    document.querySelectorAll('select[name^="sel_"]').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const p = new URLSearchParams();
+        p.set(sel.name, sel.value);
+        postParams(p);
+      });
+    });
+
+    // ---- IP健康探测 ----
+    async function refreshIpMeta() {
+      try {
+        const res = await fetch('/api/ipinfo');
+        const meta = await res.json();
+        const chips = document.querySelectorAll('#chip-list-ip .chip');
+        chips.forEach(chip => {
+          const ip = chip.dataset.ip;
+          const info = meta[ip];
+          chip.classList.remove('ok','fail');
+          if (info && info.ok) {
+            chip.classList.add('ok');
+            const parts = [];
+            if (info.country_iso) parts.push(info.country_iso);
+            if (info.asn_org) parts.push(info.asn_org);
+            const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
+            chip.textContent = `${ip}${extra}`;
+          } else {
+            chip.classList.add('fail');
+            chip.textContent = `${ip} · 未连通`;
+          }
+        });
+      } catch (e) {
+        console.warn('ipinfo fetch fail', e);
+      }
+    }
+    refreshIpMeta();
+  </script>
+</body>
+</html>

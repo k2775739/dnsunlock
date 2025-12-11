@@ -1,0 +1,205 @@
+{
+  "listen_host": "0.0.0.0",
+  "web_host": "0.0.0.0",
+  "dns_port": 5353,
+  "web_port": 22004,
+  "timeout_ms": 2000,
+  "upstream_dns": "1.1.1.1",
+  "ip_pool": [
+    "22.22.22.10",
+    "22.22.22.11",
+    "22.22.22.12",
+    "22.22.22.13",
+    "22.22.22.14",
+    "22.22.22.15",
+    "22.22.22.16",
+    "22.22.22.18"
+  ],
+  "active_service": {
+    "major": {
+      "_default": "22.22.22.10",
+      "google": "__upstream__",
+      "microsoft": "__upstream__",
+      "apple": "__upstream__",
+      "cloudflare": "__upstream__",
+      "amazon": "__upstream__",
+      "misc": "22.22.22.10"
+    },
+    "ai": {
+      "_default": "22.22.22.10",
+      "openai": "22.22.22.12",
+      "gemini": "22.22.22.14",
+      "claude": "22.22.22.10",
+      "copilot": "22.22.22.16",
+      "perplexity": "__upstream__",
+      "grok": "__upstream__",
+      "midjourney": "__upstream__",
+      "runway": "__upstream__",
+      "stability": "__upstream__",
+      "misc": "22.22.22.10"
+    },
+    "streaming": {
+      "_default": "22.22.22.10",
+      "youtube": "__upstream__",
+      "netflix": "22.22.22.13",
+      "disney": "__upstream__",
+      "hbo": "__upstream__",
+      "primevideo": "__upstream__",
+      "appletv": "__upstream__",
+      "hulu": "__upstream__",
+      "paramount": "__upstream__",
+      "peacock": "__upstream__",
+      "spotify": "__upstream__",
+      "tiktok": "__upstream__",
+      "bilibili": "__upstream__",
+      "iqiyi": "__upstream__",
+      "misc": "22.22.22.10"
+    },
+    "default": {
+      "_default": "__upstream__",
+      "misc": "22.22.22.10"
+    }
+  },
+  "rules_root": "rules",
+  "rule_sources": [
+    {
+      "cat": "streaming",
+      "svc": "youtube",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/YouTube/YouTube.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "netflix",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Netflix/Netflix.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "disney",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Disney/Disney.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "hbo",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/HBO/HBO.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "primevideo",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/PrimeVideo/PrimeVideo.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "bilibili",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Bilibili/Bilibili.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "appletv",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/AppleTV/AppleTV.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "hulu",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Hulu/Hulu.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "paramount",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ParamountPlus/ParamountPlus.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "peacock",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Peacock/Peacock.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "spotify",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Spotify/Spotify.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "tiktok",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/TikTok/TikTok.list"
+    },
+    {
+      "cat": "streaming",
+      "svc": "iqiyi",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/iQIYI/iQIYI.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "openai",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/OpenAI/OpenAI.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "gemini",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Bard/Bard.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "claude",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Claude/Claude.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "copilot",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Copilot/Copilot.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "perplexity",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Perplexity/Perplexity.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "grok",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/XAI/XAI.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "midjourney",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/MidJourney/MidJourney.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "runway",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Runway/Runway.list"
+    },
+    {
+      "cat": "ai",
+      "svc": "stability",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/StableDiffusion/StableDiffusion.list"
+    },
+    {
+      "cat": "major",
+      "svc": "google",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.list"
+    },
+    {
+      "cat": "major",
+      "svc": "microsoft",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Microsoft/Microsoft.list"
+    },
+    {
+      "cat": "major",
+      "svc": "apple",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Apple/Apple.list"
+    },
+    {
+      "cat": "major",
+      "svc": "cloudflare",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Cloudflare/Cloudflare.list"
+    },
+    {
+      "cat": "major",
+      "svc": "amazon",
+      "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Amazon/Amazon.list"
+    }
+  ],
+  "upstream_dns_pool": [
+    "1.1.1.1",
+    "8.8.8.8"
+  ]
+}
