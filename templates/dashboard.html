@@ -437,7 +437,9 @@
         const p = new URLSearchParams();
         p.set(sel.name, sel.value);
         postParams(p);
+        updateSelectColor(sel);
       });
+      updateSelectColor(sel);
     });
 
     // ---- IP健康探测 ----
@@ -502,6 +504,19 @@
       });
     }
     refreshIpMeta();
+
+    function updateSelectColor(sel){
+      const GREEN = '#0f7b31';
+      const RED = '#c70000';
+      const opt = sel.options[sel.selectedIndex];
+      if (opt && opt.classList.contains('ok')) {
+        sel.style.color = GREEN;
+      } else if (opt && opt.classList.contains('fail')) {
+        sel.style.color = RED;
+      } else {
+        sel.style.color = '';
+      }
+    }
   </script>
 </body>
 </html>
