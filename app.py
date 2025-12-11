@@ -349,6 +349,7 @@ class ConfigManager:
         self.rules_loaded_at = time.time()
         self.ip_meta_cache = {}
         self.ip_meta_fetched_at = 0
+        self.reloading = False
 
     def save(self):
         with self.lock:
@@ -395,6 +396,22 @@ class ConfigManager:
         self.rules, self.domain_map = load_rules_from_repo(root)
         self.rules_loaded_at = time.time()
 
+    def reload_rules_async(self):
+        with self.lock:
+            if self.reloading:
+                return False
+            self.reloading = True
+
+        def worker():
+            try:
+                self.reload_rules()
+            finally:
+                with self.lock:
+                    self.reloading = False
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
     def get_snapshot(self):
         with self.lock:
             cfg_copy = self.config.copy()
@@ -410,6 +427,7 @@ class ConfigManager:
                 "rule_counts": rule_counts,
                 "service_counts": service_counts,
                 "rules_loaded_at": self.rules_loaded_at,
+                "reloading": self.reloading,
             }
         meta = rules_meta
         combined = {**cfg_copy, **meta}
@@ -600,28 +618,31 @@ class WebHandler(BaseHTTPRequestHandler):
         return self.server.config  # type: ignore
 
     def do_GET(self):
-        if self.path.startswith("/api/config"):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path.endswith("api/config"):
             body, _ = self.cfg.get_snapshot()
             return self._send(200, body, "application/json")
-        if self.path.startswith("/api/ipinfo"):
+        if path.endswith("api/ipinfo"):
             meta = self.cfg.get_ip_meta(force="refresh" in self.path)
             return self._send(200, json.dumps(meta).encode("utf-8"), "application/json")
-        if self.path.startswith("/api/rules_info"):
+        if path.endswith("api/rules_info"):
             _, snap = self.cfg.get_snapshot()
             info = {
                 "rule_counts": snap.get("rule_counts"),
                 "rules_loaded_at": snap.get("rules_loaded_at"),
                 "rules_root": snap.get("rules_root"),
+                "reloading": snap.get("reloading", False),
             }
             return self._send(200, json.dumps(info).encode("utf-8"), "application/json")
         return self._send(200, self.render_dashboard().encode("utf-8"))
 
     def do_POST(self):
+        path = self.path.split("?", 1)[0].rstrip("/")
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length).decode("utf-8")
         data = parse_qs(raw)
 
-        if self.path.startswith("/save_upstreams"):
+        if path.endswith("save_upstreams"):
             # 只更新提交的部分，其他保持当前配置
             _, snap = self.cfg.get_snapshot()
             current_cfg = snap
@@ -684,8 +705,11 @@ class WebHandler(BaseHTTPRequestHandler):
                     active_map[cat].setdefault(svc, active_map[cat]["_default"])
 
             self.cfg.update_ip_pool(new_ip_pool, active_map, new_upstream_dns, new_upstream_pool)
-        elif self.path.startswith("/refresh_rules"):
-            self.cfg.reload_rules()
+        elif path.endswith("refresh_rules"):
+            started = self.cfg.reload_rules_async()
+            resp = {"started": started}
+            self._send(202 if started else 200, json.dumps(resp).encode("utf-8"), "application/json")
+            return
         self.send_response(303)
         self.send_header("Location", "/")
         self.end_headers()
@@ -699,7 +723,8 @@ class WebHandler(BaseHTTPRequestHandler):
         rule_counts = cfg.get("rule_counts", {})
         service_counts = cfg.get("service_counts", {})
         rules_root = cfg.get("rules_root", "rules")
-        loaded_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cfg.get("rules_loaded_at", 0)))
+        loaded_at_raw = cfg.get("rules_loaded_at", 0)
+        loaded_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(loaded_at_raw))
 
         def select_html(cat, slug, current):
             name = f"sel_{cat}__{slug}"
@@ -753,6 +778,7 @@ class WebHandler(BaseHTTPRequestHandler):
             rule_summary=rule_summary,
             loaded_at=loaded_at,
             upstream_dns=upstream_dns,
+            loaded_at_ts=str(int(loaded_at_raw)),
         )
 
 

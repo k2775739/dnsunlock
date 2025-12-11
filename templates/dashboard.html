@@ -211,13 +211,14 @@
     <p class="lead">规则自动来自 ios_rule_script；为每个分类选择“解析到的 IP”，或转发到上游 DNS。</p>
   </header>
   <main>
-    <form method="POST" action="/save_upstreams" style="display:contents;">
+    <form method="POST" action="save_upstreams" style="display:contents;">
       <section class="card">
         <h2>IP / 上游 DNS 池</h2>
         <div class="chip-bar">
           <div class="chip-head">
             <span style="color:var(--muted);font-size:13px;">IP 池（解析结果）</span>
             <div class="chip-actions">
+              <button type="button" class="ghost-btn" id="refresh-ipinfo">刷新探测</button>
               <button type="button" class="ghost-btn" id="edit-toggle-ip">编辑</button>
               <button type="button" class="ghost-btn danger" id="delete-selected-ip" style="display:none;">删除选中</button>
             </div>
@@ -253,15 +254,13 @@
     </form>
 
     <section class="card">
-      <h2>规则状态（自动加载）</h2>
-      <p style="color:var(--muted);">来源目录: <code>${rules_root}</code></p>
-      <p style="color:var(--muted);">已加载: ${rule_summary}</p>
-      <p style="color:var(--muted);">最近刷新: ${loaded_at}</p>
-      <form method="POST" action="/refresh_rules">
-        <button class="btn" type="submit">刷新规则</button>
-      </form>
-      <p style="margin-top:8px;color:var(--muted);font-size:12px;">规则内容不在面板显示；请在本地同步/更新 blackmatrix7/ios_rule_script 后点击刷新。</p>
-    </section>
+        <h2>规则状态（自动加载）</h2>
+        <p style="color:var(--muted);">来源目录: <code>${rules_root}</code></p>
+        <p style="color:var(--muted);">已加载: ${rule_summary}</p>
+        <p style="color:var(--muted);">最近刷新: ${loaded_at}</p>
+        <button class="btn" type="button" id="refresh-rules-btn">后台刷新规则</button>
+        <p style="margin-top:8px;color:var(--muted);font-size:12px;">规则内容不在面板显示；请在本地同步/更新 blackmatrix7/ios_rule_script 后点击刷新。</p>
+      </section>
   </main>
   <div class="footer">DNSUnlock · 规则来自 ios_rule_script · 选择式分流</div>
   <script>
@@ -354,12 +353,14 @@
     const getIps = setupChipManager('ip');
     const getDns = setupChipManager('dns');
 
+    document.getElementById('refresh-ipinfo')?.addEventListener('click', () => refreshIpMeta(true));
+
     const form = document.querySelector('form[action="/save_upstreams"]');
     form.addEventListener('submit', e => e.preventDefault());
 
     async function postParams(params) {
       try {
-        await fetch('/save_upstreams', {
+        await fetch('save_upstreams', {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
           body: params.toString(),
@@ -397,6 +398,28 @@
       postParams(p);
     }
 
+    // 规则后台刷新：发起后轮询状态，成功再刷新页面
+    const rulesBtn = document.getElementById('refresh-rules-btn');
+    const initialRulesTs = Number('${loaded_at_ts}');
+    async function pollRules(tsBefore) {
+      try {
+        const res = await fetch('api/rules_info');
+        const info = await res.json();
+        if (!info.reloading && info.rules_loaded_at && info.rules_loaded_at > tsBefore) {
+          location.reload();
+          return;
+        }
+      } catch (_) {}
+      setTimeout(() => pollRules(tsBefore), 1000);
+    }
+    rulesBtn?.addEventListener('click', async () => {
+      showToast('后台刷新规则中...');
+      try {
+        await fetch('refresh_rules', {method: 'POST'});
+      } catch (_) {}
+      pollRules(initialRulesTs || 0);
+    });
+
     // 仅更新当前变动：下拉改变 -> 只发该项；DNS激活 -> 只发upstream_dns；
     // IP/DNS池增删 -> 只发对应池（DNS池还会带上当前上游）。
     document.querySelectorAll('select[name^="sel_"]').forEach(sel => {
@@ -408,9 +431,10 @@
     });
 
     // ---- IP健康探测 ----
-    async function refreshIpMeta() {
+    async function refreshIpMeta(force=false) {
       try {
-        const res = await fetch('/api/ipinfo');
+        if (force) showToast('正在刷新 IP 探测...');
+        const res = await fetch(force ? 'api/ipinfo?refresh=1' : 'api/ipinfo');
         const meta = await res.json();
         const chips = document.querySelectorAll('#chip-list-ip .chip');
         chips.forEach(chip => {
@@ -429,6 +453,7 @@
             chip.textContent = `${ip} · 未连通`;
           }
         });
+        if (force) showToast('IP 探测完成');
       } catch (e) {
         console.warn('ipinfo fetch fail', e);
       }
