@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
         {"cat": "streaming", "svc": "disney", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Disney/Disney.list"},
         {"cat": "streaming", "svc": "hbo", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/HBO/HBO.list"},
         {"cat": "streaming", "svc": "primevideo", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/PrimeVideo/PrimeVideo.list"},
-        {"cat": "streaming", "svc": "bilibili", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Bilibili/Bilibili.list"},
+        {"cat": "streaming", "svc": "bilibili", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/BiliBili/BiliBili.list"},
         {"cat": "streaming", "svc": "appletv", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/AppleTV/AppleTV.list"},
         {"cat": "streaming", "svc": "hulu", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Hulu/Hulu.list"},
         {"cat": "streaming", "svc": "paramount", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ParamountPlus/ParamountPlus.list"},
@@ -67,14 +67,10 @@ DEFAULT_CONFIG = {
         {"cat": "streaming", "svc": "tiktok", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/TikTok/TikTok.list"},
         {"cat": "streaming", "svc": "iqiyi", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/iQIYI/iQIYI.list"},
         {"cat": "ai", "svc": "openai", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/OpenAI/OpenAI.list"},
-        {"cat": "ai", "svc": "gemini", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Bard/Bard.list"},
+        {"cat": "ai", "svc": "gemini", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Gemini/Gemini.list"},
         {"cat": "ai", "svc": "claude", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Claude/Claude.list"},
         {"cat": "ai", "svc": "copilot", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Copilot/Copilot.list"},
-        {"cat": "ai", "svc": "perplexity", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Perplexity/Perplexity.list"},
-        {"cat": "ai", "svc": "grok", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/XAI/XAI.list"},
-        {"cat": "ai", "svc": "midjourney", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/MidJourney/MidJourney.list"},
-        {"cat": "ai", "svc": "runway", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Runway/Runway.list"},
-        {"cat": "ai", "svc": "stability", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/StableDiffusion/StableDiffusion.list"},
+        {"cat": "ai", "svc": "grok", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Twitter/Twitter.list"},
         {"cat": "major", "svc": "google", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.list"},
         {"cat": "major", "svc": "microsoft", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Microsoft/Microsoft.list"},
         {"cat": "major", "svc": "apple", "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Apple/Apple.list"},
@@ -118,6 +114,9 @@ SERVICE_CATALOG = {
         {"slug": "amazon", "name": "Amazon / AWS", "keywords": ["amazon", "aws"]},
     ],
 }
+
+# 用于重复域名的优先级判定：数值越大越优先
+CATEGORY_PRIORITY = {"ai": 3, "streaming": 2, "major": 1, "default": 0}
 
 # ---------- Rule loading (from ios_rule_script) ----------
 def extract_domain(line: str) -> Optional[str]:
@@ -169,21 +168,7 @@ def fetch_and_cache_rules(root: str, sources: list):
         except Exception:
             # keep old cache if download fails
             continue
-    # Ensure every service has a local file; generate fallback with keywords
-    for cat, services in SERVICE_CATALOG.items():
-        for svc in services:
-            slug = svc["slug"]
-            filename = f"{cat}__{slug}.list"
-            dest = os.path.join(root, filename)
-            if filename in downloaded or os.path.exists(dest):
-                continue
-            try:
-                with open(dest, "w", encoding="utf-8") as f:
-                    for kw in svc.get("keywords", []):
-                        f.write(f"DOMAIN-SUFFIX,{kw}\n")
-                downloaded.add(filename)
-            except Exception:
-                continue
+    # 不再生成包含关键词的兜底文件；让无规则的服务保持缺失/空，前端即可隐藏
 
 
 def load_rules_from_repo(root: str):
@@ -207,9 +192,16 @@ def load_rules_from_repo(root: str):
                 with open(full, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         dom = extract_domain(line)
-                        if dom:
-                            rules.setdefault(cat, {}).setdefault(svc, set()).add(dom)
-                            domain_map[dom] = (cat, svc)
+                        if not dom:
+                            continue
+                        rules.setdefault(cat, {}).setdefault(svc, set()).add(dom)
+                        # 如果同一域名出现在多个分类，按 CATEGORY_PRIORITY 取高优先级
+                        prev = domain_map.get(dom)
+                        if prev:
+                            prev_cat, _ = prev
+                            if CATEGORY_PRIORITY.get(cat, 0) <= CATEGORY_PRIORITY.get(prev_cat, 0):
+                                continue
+                        domain_map[dom] = (cat, svc)
             except Exception:
                 continue
     # ensure deterministic ordering
@@ -795,8 +787,13 @@ class WebHandler(BaseHTTPRequestHandler):
                 label = svc["name"]
                 current = cat_map.get(slug, cat_map.get("_default", ip_pool[0]))
                 count = counts_cat.get(slug, 0)
+                # 没有规则的服务不显示行（保留 _default 行）
+                if slug != "_default" and count == 0:
+                    continue
                 badge = f"<span class='pill'>{count} 条规则</span>"
                 rows.append(f'<div class="row"><div class="row-head"><span>{label}</span>{badge}</div>{select_html(cat, slug, current)}</div>')
+            if not rows:
+                return ""
             return f'<section class="card"><h2>{title}</h2>{"".join(rows)}</section>'
 
         # pre-fill chip text; color will be set by JS after拉取 /api/ipinfo
