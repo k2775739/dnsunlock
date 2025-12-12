@@ -14,7 +14,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
 from string import Template
 from pathlib import Path
 import ipaddress
@@ -119,15 +119,37 @@ SERVICE_CATALOG = {
 CATEGORY_PRIORITY = {"ai": 3, "streaming": 2, "major": 1, "default": 0}
 
 # ---------- Rule loading (from ios_rule_script) ----------
-def extract_domain(line: str) -> Optional[str]:
-    """Parse a Clash/Surge rule line to a bare domain."""
+def parse_rule_line(line: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse a Clash/Surge rule line.
+
+    Returns (kind, value):
+      - "domain": DOMAIN / DOMAIN-SUFFIX
+      - "keyword": DOMAIN-KEYWORD
+      - "cidr": IP-CIDR (IPv4)
+      - "cidr6": IP-CIDR6 (IPv6)
+    """
     line = line.strip()
     if not line or line.startswith(("#", "//", ";")):
-        return None
-    if "," in line:
-        _, rhs = line.split(",", 1)
-        return rhs.strip().lower()
-    return line.lower()
+        return None, None
+    if "," not in line:
+        return "domain", line.lower()
+    parts = [p.strip() for p in line.split(",") if p.strip()]
+    if not parts:
+        return None, None
+    rtype = parts[0].upper()
+    if rtype in ("DOMAIN", "DOMAIN-SUFFIX"):
+        if len(parts) >= 2:
+            return "domain", parts[1].lower()
+        return None, None
+    if rtype == "DOMAIN-KEYWORD":
+        if len(parts) >= 2:
+            return "keyword", parts[1].lower()
+        return None, None
+    if rtype in ("IP-CIDR", "IP-CIDR6"):
+        if len(parts) >= 2:
+            return ("cidr6" if rtype == "IP-CIDR6" else "cidr"), parts[1]
+        return None, None
+    return None, None
 
 
 def guess_category(path_lower: str) -> str:
@@ -175,11 +197,16 @@ def load_rules_from_repo(root: str):
     """Walk rules_root and build:
     - rules: category -> service -> sorted domain list
     - domain_map: domain -> (category, service)
+    - keyword_rules: list[(keyword, category, service, priority)]
+    - cidr_rules_v4 / cidr_rules_v6: list[(network, category, service, priority)]
     """
-    rules = {cat: {} for cat in SERVICE_CATALOG.keys()}
-    domain_map = {}
+    rules: Dict[str, Dict[str, set]] = {cat: {} for cat in SERVICE_CATALOG.keys()}
+    domain_map: Dict[str, Tuple[str, str]] = {}
+    keyword_map: Dict[str, Tuple[str, str, str, int]] = {}
+    cidr_map_v4: Dict[str, Tuple[ipaddress.IPv4Network, str, str, int]] = {}
+    cidr_map_v6: Dict[str, Tuple[ipaddress.IPv6Network, str, str, int]] = {}
     if not os.path.isdir(root):
-        return rules, domain_map
+        return rules, domain_map, [], [], []
     for dirpath, _, files in os.walk(root):
         for fname in files:
             if not fname.endswith(".list"):
@@ -188,27 +215,55 @@ def load_rules_from_repo(root: str):
             rel = os.path.relpath(full, root).lower()
             cat = guess_category(rel)
             svc = guess_service(rel, cat)
+            pri = CATEGORY_PRIORITY.get(cat, 0)
             try:
                 with open(full, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
-                        dom = extract_domain(line)
-                        if not dom:
+                        kind, val = parse_rule_line(line)
+                        if not kind or not val:
                             continue
-                        rules.setdefault(cat, {}).setdefault(svc, set()).add(dom)
-                        # 如果同一域名出现在多个分类，按 CATEGORY_PRIORITY 取高优先级
-                        prev = domain_map.get(dom)
-                        if prev:
-                            prev_cat, _ = prev
-                            if CATEGORY_PRIORITY.get(cat, 0) <= CATEGORY_PRIORITY.get(prev_cat, 0):
+                        if kind == "domain":
+                            dom = val
+                            rules.setdefault(cat, {}).setdefault(svc, set()).add(dom)
+                            # 如果同一域名出现在多个分类，按 CATEGORY_PRIORITY 取高优先级
+                            prev = domain_map.get(dom)
+                            if prev:
+                                prev_cat, _ = prev
+                                if pri <= CATEGORY_PRIORITY.get(prev_cat, 0):
+                                    continue
+                            domain_map[dom] = (cat, svc)
+                        elif kind == "keyword":
+                            kw = val
+                            prev = keyword_map.get(kw)
+                            if prev and pri <= prev[3]:
                                 continue
-                        domain_map[dom] = (cat, svc)
+                            keyword_map[kw] = (kw, cat, svc, pri)
+                        elif kind in ("cidr", "cidr6"):
+                            try:
+                                net = ipaddress.ip_network(val, strict=False)
+                            except Exception:
+                                continue
+                            key = str(net)
+                            if kind == "cidr" and isinstance(net, ipaddress.IPv4Network):
+                                prev = cidr_map_v4.get(key)
+                                if prev and pri <= prev[3]:
+                                    continue
+                                cidr_map_v4[key] = (net, cat, svc, pri)
+                            if kind == "cidr6" and isinstance(net, ipaddress.IPv6Network):
+                                prev = cidr_map_v6.get(key)
+                                if prev and pri <= prev[3]:
+                                    continue
+                                cidr_map_v6[key] = (net, cat, svc, pri)
             except Exception:
                 continue
-    # ensure deterministic ordering
-    rules_sorted = {}
+    # ensure deterministic ordering for domain rules
+    rules_sorted: Dict[str, Dict[str, List[str]]] = {}
     for cat, svc_dict in rules.items():
         rules_sorted[cat] = {svc: sorted(list(domains)) for svc, domains in svc_dict.items()}
-    return rules_sorted, domain_map
+    keyword_rules = sorted(keyword_map.values(), key=lambda x: (-x[3], -len(x[0]), x[0]))
+    cidr_rules_v4 = sorted(cidr_map_v4.values(), key=lambda x: (-x[0].prefixlen, -x[3], str(x[0])))
+    cidr_rules_v6 = sorted(cidr_map_v6.values(), key=lambda x: (-x[0].prefixlen, -x[3], str(x[0])))
+    return rules_sorted, domain_map, keyword_rules, cidr_rules_v4, cidr_rules_v6
 
 def fetch_ip_meta(ip: str, timeout: float = 6.0) -> dict:
     """Use curl with --resolve to query ifconfig.co/json via the target IP.
@@ -341,7 +396,13 @@ class ConfigManager:
         self.path = path
         self.lock = threading.RLock()
         self.config = ensure_config()
-        self.rules, self.domain_map = load_rules_from_repo(self.config.get("rules_root", "rules"))
+        (
+            self.rules,
+            self.domain_map,
+            self.keyword_rules,
+            self.cidr_rules_v4,
+            self.cidr_rules_v6,
+        ) = load_rules_from_repo(self.config.get("rules_root", "rules"))
         self.rules_loaded_at = time.time()
         self.ip_meta_cache = {}
         self.ip_meta_fetched_at = 0
@@ -389,7 +450,13 @@ class ConfigManager:
             root = self.config.get("rules_root", "rules")
             sources = self.config.get("rule_sources", [])
         fetch_and_cache_rules(root, sources)
-        self.rules, self.domain_map = load_rules_from_repo(root)
+        (
+            self.rules,
+            self.domain_map,
+            self.keyword_rules,
+            self.cidr_rules_v4,
+            self.cidr_rules_v6,
+        ) = load_rules_from_repo(root)
         self.rules_loaded_at = time.time()
 
     def reload_rules_async(self):
@@ -429,12 +496,16 @@ class ConfigManager:
         combined = {**cfg_copy, **meta}
         return json.dumps(combined).encode("utf-8"), combined
 
-    def select_upstream(self, qname: str) -> str:
-        """Return route ("ip" or "upstream", target)."""
+    def select_upstream(self, qname: str) -> Tuple[str, str, bool]:
+        """Return route ("ip" or "upstream", target, matched).
+
+        matched=True when a domain/keyword rule hit; False means default route.
+        """
         name = qname.lower().rstrip(".")
         labels = name.split(".")
         with self.lock:
             domain_map = self.domain_map
+            keyword_rules = getattr(self, "keyword_rules", [])
             active = self.config.get("active_service", {})
             pool = self.config.get("ip_pool") or DEFAULT_CONFIG["ip_pool"]
             default_route = active.get("default", {}).get("_default", pool[0])
@@ -447,11 +518,19 @@ class ConfigManager:
                 cat_map = active.get(cat, {})
                 chosen = cat_map.get(svc, cat_map.get("_default", default_route))
                 if chosen == "__upstream__":
-                    return ("upstream", upstream_dns)
-                return ("ip", chosen)
+                    return ("upstream", upstream_dns, True)
+                return ("ip", chosen, True)
+        # Keyword rules (substring match)
+        for kw, cat, svc, _pri in keyword_rules:
+            if kw and kw in name:
+                cat_map = active.get(cat, {})
+                chosen = cat_map.get(svc, cat_map.get("_default", default_route))
+                if chosen == "__upstream__":
+                    return ("upstream", upstream_dns, True)
+                return ("ip", chosen, True)
         if default_route == "__upstream__":
-            return ("upstream", upstream_dns)
-        return ("ip", default_route)
+            return ("upstream", upstream_dns, False)
+        return ("ip", default_route, False)
 
     def get_ip_meta(self, force=False):
         """Return IP meta info dict ip->meta; refresh if cache stale or force."""
@@ -582,6 +661,91 @@ def forward_query(upstream: str, query: bytes, timeout_ms: int) -> bytes:
         return s.recvfrom(4096)[0]
 
 
+def _read_name(packet: bytes, offset: int) -> Tuple[Optional[str], int]:
+    """Read a DNS name at offset, handling compression. Returns (name, next_offset)."""
+    labels: List[str] = []
+    jumped = False
+    next_offset = offset
+    while True:
+        if offset >= len(packet):
+            return None, offset
+        length = packet[offset]
+        if length == 0:
+            offset += 1
+            if not jumped:
+                next_offset = offset
+            break
+        # compression pointer
+        if length & 0xC0 == 0xC0:
+            if offset + 1 >= len(packet):
+                return None, offset + 2
+            ptr = ((length & 0x3F) << 8) | packet[offset + 1]
+            if not jumped:
+                next_offset = offset + 2
+                jumped = True
+            offset = ptr
+            continue
+        offset += 1
+        if offset + length > len(packet):
+            return None, offset + length
+        labels.append(packet[offset : offset + length].decode("utf-8", errors="ignore"))
+        offset += length
+        if not jumped:
+            next_offset = offset
+    return ".".join(labels).lower() if labels else "", next_offset
+
+
+def extract_a_records(resp: bytes) -> List[str]:
+    """Extract IPv4 A record addresses from a DNS response."""
+    ips: List[str] = []
+    if len(resp) < 12:
+        return ips
+    try:
+        qdcount = int.from_bytes(resp[4:6], "big")
+        ancount = int.from_bytes(resp[6:8], "big")
+        pos = 12
+        for _ in range(qdcount):
+            _, pos = _read_name(resp, pos)
+            pos += 4  # QTYPE + QCLASS
+        for _ in range(ancount):
+            _, pos = _read_name(resp, pos)
+            if pos + 10 > len(resp):
+                break
+            rtype = int.from_bytes(resp[pos : pos + 2], "big")
+            rdlen = int.from_bytes(resp[pos + 8 : pos + 10], "big")
+            pos += 10
+            rdata = resp[pos : pos + rdlen]
+            if rtype == 1 and rdlen == 4:
+                try:
+                    ips.append(str(ipaddress.IPv4Address(rdata)))
+                except Exception:
+                    pass
+            pos += rdlen
+    except Exception:
+        return ips
+    return ips
+
+
+def match_ips_to_cidr(ips: List[str], cidr_rules) -> Optional[Tuple[str, str]]:
+    """Return (cat, svc) if any IP hits a CIDR rule."""
+    if not ips or not cidr_rules:
+        return None
+    ip_objs = []
+    for ip_s in ips:
+        try:
+            ip_objs.append(ipaddress.ip_address(ip_s))
+        except Exception:
+            continue
+    for net, cat, svc, _pri in cidr_rules:
+        for ip_obj in ip_objs:
+            try:
+                if ip_obj.version == net.version and ip_obj in net:
+                    return cat, svc
+            except Exception:
+                continue
+    return None
+
+
 def dns_worker(server_sock: socket.socket, cfg: ConfigManager, executor: ThreadPoolExecutor):
     while True:
         data, addr = server_sock.recvfrom(4096)
@@ -594,14 +758,38 @@ def process_query(data: bytes, client_addr, server_sock: socket.socket, cfg: Con
     except Exception:
         response = build_servfail(data)
     else:
-        mode, target = cfg.select_upstream(qname)
+        mode, target, matched = cfg.select_upstream(qname)
         if mode == "upstream":
             _, snapshot = cfg.get_snapshot()
             timeout_ms = snapshot.get("timeout_ms", 2000)
             try:
-                response = forward_query(target, data, timeout_ms)
+                upstream_resp = forward_query(target, data, timeout_ms)
             except Exception:
-                response = build_servfail(data)
+                upstream_resp = build_servfail(data)
+
+            # Only apply IP-CIDR rules when no domain/keyword rule matched.
+            if not matched and qtype == 1:
+                cidr_rules = getattr(cfg, "cidr_rules_v4", [])
+                ips = extract_a_records(upstream_resp)
+                hit = match_ips_to_cidr(ips, cidr_rules)
+                if hit:
+                    cat, svc = hit
+                    with cfg.lock:
+                        active = cfg.config.get("active_service", {})
+                        pool = cfg.config.get("ip_pool") or DEFAULT_CONFIG["ip_pool"]
+                        default_route = active.get("default", {}).get("_default", pool[0])
+                        upstream_dns = cfg.config.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
+                    cat_map = active.get(cat, {})
+                    chosen = cat_map.get(svc, cat_map.get("_default", default_route))
+                    if chosen != "__upstream__":
+                        response = build_a_response(data, chosen, qend)
+                    else:
+                        # still upstream for this service
+                        response = upstream_resp
+                else:
+                    response = upstream_resp
+            else:
+                response = upstream_resp
         else:
             if qtype == 1:  # A
                 response = build_a_response(data, target, qend)
