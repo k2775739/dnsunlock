@@ -32,11 +32,7 @@
       "gemini": "22.22.22.10",
       "claude": "22.22.22.14",
       "copilot": "22.22.22.16",
-      "perplexity": "__upstream__",
       "grok": "__upstream__",
-      "midjourney": "__upstream__",
-      "runway": "__upstream__",
-      "stability": "__upstream__",
       "misc": "22.22.22.10"
     },
     "streaming": {
