@@ -6,7 +6,7 @@ Python-only DNS forwarder with Clash-style policy groups and an Apple-style web 
 
 - 读取 Clash 策略（INI / config.yaml），按规则命中分流组
 - 分流组选择等同 Clash：选择某 IP = DNS 直接解析到该 IP；选择 DIRECT = 使用上游 DNS 正常解析
-- url-test 以 IP 探测方式代替真实代理测速（使用 netvigator 探测接口）
+- url-test 以 curl --resolve 探测方式代替真实代理测速（默认 `http://www.gstatic.com/generate_204`，也会读取策略里的 url）
 """
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
 }
 
 IP_INFO_SITES = ("netvigator", "ifconfig")
+DEFAULT_URLTEST_URL = "http://www.gstatic.com/generate_204"
 
 
 def _curl_resolve_target(host: str, port: int, ip: str) -> str:
@@ -77,11 +78,10 @@ def _fetch_ip_meta_ifconfig(ip: str, timeout: float = 6.0) -> dict:
     """Query ifconfig.co/json via the target IP (curl --resolve).
 
     Returns dict:
-      {ok, ip, real_ip, country_iso, asn_org, source, ms}
+      {ok, ip, real_ip, country_iso, asn_org, source}
     """
     if not is_valid_ip(ip):
         return {"ok": False, "ip": ip, "source": "ifconfig"}
-    start = time.monotonic()
     cmd = [
         "curl",
         "--resolve",
@@ -95,7 +95,6 @@ def _fetch_ip_meta_ifconfig(ip: str, timeout: float = 6.0) -> dict:
     ]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout + 1)
-        ms = int((time.monotonic() - start) * 1000)
         data = json.loads(out.decode("utf-8", errors="ignore").strip() or "{}")
         return {
             "ok": True,
@@ -104,11 +103,9 @@ def _fetch_ip_meta_ifconfig(ip: str, timeout: float = 6.0) -> dict:
             "country_iso": data.get("country_iso"),
             "asn_org": data.get("asn_org"),
             "source": "ifconfig",
-            "ms": ms,
         }
     except Exception:
-        ms = int((time.monotonic() - start) * 1000)
-        return {"ok": False, "ip": ip, "source": "ifconfig", "ms": ms}
+        return {"ok": False, "ip": ip, "source": "ifconfig"}
 
 
 def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
@@ -118,11 +115,10 @@ def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
       {"resultCode":"6","ip":"2400:...","countryCode":"HK","isp":"null"}
 
     Returns dict:
-      {ok, ip, real_ip, country_iso, asn_org, source, result_code, ms}
+      {ok, ip, real_ip, country_iso, asn_org, source, result_code}
     """
     if not is_valid_ip(ip):
         return {"ok": False, "ip": ip, "source": "netvigator"}
-    start = time.monotonic()
     cmd = [
         "curl",
         "--resolve",
@@ -136,7 +132,6 @@ def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
     ]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout + 1)
-        ms = int((time.monotonic() - start) * 1000)
         raw = out.decode("utf-8", errors="ignore").strip()
         data = json.loads(raw or "{}")
         real_ip = data.get("ip")
@@ -154,11 +149,59 @@ def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
             "asn_org": isp,
             "source": "netvigator",
             "result_code": result_code,
-            "ms": ms,
         }
     except Exception:
+        return {"ok": False, "ip": ip, "source": "netvigator"}
+
+
+def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, int]:
+    """Probe the given URL by forcing DNS resolve to the provided IP.
+
+    This approximates Clash url-test delay: connect+request total time (ms).
+    """
+    if not is_valid_ip(ip):
+        return False, 0
+    effective_url = (url or "").strip()
+    u = urlparse(effective_url)
+    host = u.hostname
+    if not host:
+        effective_url = DEFAULT_URLTEST_URL
+        u = urlparse(effective_url)
+        host = u.hostname
+    if not host:
+        return False, 0
+    scheme = (u.scheme or "http").lower()
+    port = u.port or (443 if scheme == "https" else 80)
+    resolve = _curl_resolve_target(host, int(port), ip)
+    cmd = [
+        "curl",
+        "--resolve",
+        resolve,
+        "-m",
+        str(int(timeout)),
+        "--connect-timeout",
+        "3",
+        "-o",
+        "/dev/null",
+        "-s",
+        "-w",
+        "%{http_code}",
+        effective_url,
+    ]
+    start = time.monotonic()
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout + 1)
         ms = int((time.monotonic() - start) * 1000)
-        return {"ok": False, "ip": ip, "source": "netvigator", "ms": ms}
+        code_s = (out.decode("utf-8", errors="ignore").strip() or "0").strip()
+        try:
+            code = int(code_s)
+        except Exception:
+            code = 0
+        ok = 200 <= code < 400
+        return ok, ms
+    except Exception:
+        ms = int((time.monotonic() - start) * 1000)
+        return False, ms
 
 
 def fetch_ip_meta(ip: str, timeout: float = 6.0, site: str = "netvigator") -> dict:
@@ -1022,11 +1065,8 @@ class ConfigManager:
             return True
         return name.endswith("." + suffix)
 
-    def _probe_latency_ms(self, ip: str, timeout: float = 4.0) -> Tuple[bool, int]:
-        start = time.monotonic()
-        meta = fetch_ip_meta(ip, timeout=timeout, site="netvigator")
-        ms = int((time.monotonic() - start) * 1000)
-        return bool(meta.get("ok")), ms
+    def _probe_latency_ms(self, ip: str, url: Optional[str] = None, timeout: float = 4.0) -> Tuple[bool, int]:
+        return probe_url_latency(ip, url or DEFAULT_URLTEST_URL, timeout=timeout)
 
     def _urltest_pick(self, group_name: str, group: dict, candidates: list) -> str:
         interval = group.get("interval") or 300
@@ -1034,8 +1074,10 @@ class ConfigManager:
             interval = int(interval)
         except Exception:
             interval = 300
+        test_url = (group.get("url") or DEFAULT_URLTEST_URL) if isinstance(group, dict) else DEFAULT_URLTEST_URL
+        test_url = str(test_url or DEFAULT_URLTEST_URL).strip() or DEFAULT_URLTEST_URL
         now = time.time()
-        key = (group_name, tuple(candidates))
+        key = (group_name, test_url, tuple(candidates))
         with self.lock:
             cached = self.urltest_cache.get(key)
         if cached and now - cached.get("tested_at", 0) < interval:
@@ -1044,7 +1086,7 @@ class ConfigManager:
         best_ms = None
         results = {}
         for ip in candidates:
-            ok, ms = self._probe_latency_ms(ip)
+            ok, ms = self._probe_latency_ms(ip, url=test_url)
             results[ip] = {"ok": ok, "ms": ms}
             if ok and (best is None or ms < best_ms):
                 best = ip
@@ -1303,7 +1345,14 @@ class ConfigManager:
             return cached
         meta = {}
         for ip in pool:
-            meta[ip] = fetch_ip_meta(ip, site=site)
+            info = fetch_ip_meta(ip, site=site)
+            if not isinstance(info, dict):
+                info = {}
+            lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0)
+            info["meta_ok"] = bool(info.get("ok"))
+            info["ok"] = bool(lat_ok)
+            info["ms"] = int(lat_ms)
+            meta[ip] = info
         with self.lock:
             self.ip_meta_cache = meta
             self.ip_meta_fetched_at = time.time()
@@ -1324,6 +1373,12 @@ class ConfigManager:
             if not force and age < 600 and self.ip_meta_site_cached == site and ip in self.ip_meta_cache:
                 return self.ip_meta_cache[ip]
         meta = fetch_ip_meta(ip, site=site)
+        if not isinstance(meta, dict):
+            meta = {}
+        lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0)
+        meta["meta_ok"] = bool(meta.get("ok"))
+        meta["ok"] = bool(lat_ok)
+        meta["ms"] = int(lat_ms)
         with self.lock:
             if self.ip_meta_site_cached != site:
                 self.ip_meta_cache = {}
@@ -1869,7 +1924,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 rules_by_target[target] = rules_by_target.get(target, 0) + inc
 
         # --- Clash groups ---
-        group_rows = []
+        group_cards = []
         if pol and isinstance(getattr(pol, "groups", None), dict):
             for gname, g in pol.groups.items():
                 gtype = _normalize_group_type(g.get("type"))
@@ -1897,23 +1952,47 @@ class WebHandler(BaseHTTPRequestHandler):
                         members = [current] + members
 
                 rules_cnt = rules_by_target.get(gname, 0)
-                rules_badge = f"<span class='pill' title='该分组命中的规则条数'>{int(rules_cnt or 0)} 条规则</span>"
-                badge = rules_badge
-                group_rows.append(
-                    "<div class=\"row\">"
+                badge = ""
+                # url-test/fallback/load-balance groups are usually "node pickers", not rule targets.
+                # Only show rule count for select groups to reduce noise.
+                if gtype == "select":
+                    badge = f"<span class='pill' title='该分组命中的规则条数'>{int(rules_cnt or 0)} 条规则</span>"
+                group_cards.append(
+                    "<section class=\"card group-card\">"
                     f"<div class=\"row-head\"><span>{html.escape(gname)}</span>{badge}</div>"
                     f"{group_select('selg__' + gname, current, members, gtype)}"
-                    "</div>"
+                    "</section>"
                 )
 
-        if not group_rows:
+        head_html = (
+            "<div class=\"groups-head\">"
+            "<div class=\"groups-head-left\">"
+            "<h2>分流组选择</h2>"
+            "<span class=\"pill clash\">Clash</span>"
+            "</div>"
+            "</div>"
+        )
+
+        if not group_cards:
             if cfg.get("reloading"):
                 msg = "策略加载中，请稍候…"
             else:
                 msg = "未加载策略或策略无可选分组。"
-            return f'<section class="card" id="clash-groups"><h2>分流组选择（Clash）</h2><p style="color:var(--muted);">{html.escape(msg)}</p></section>'
+            return (
+                '<section id="clash-groups" class="groups-area">'
+                f"{head_html}"
+                '<div class="group-grid">'
+                f'<section class="card group-card"><p style="color:var(--muted);margin:0;">{html.escape(msg)}</p></section>'
+                "</div>"
+                "</section>"
+            )
 
-        return f'<section class="card" id="clash-groups"><h2>分流组选择（Clash）</h2>{"".join(group_rows)}</section>'
+        return (
+            '<section id="clash-groups" class="groups-area">'
+            f"{head_html}"
+            f'<div class="group-grid">{"".join(group_cards)}</div>'
+            "</section>"
+        )
 
 
 # ---------- Server bootstrap ----------

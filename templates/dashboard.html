@@ -30,7 +30,7 @@
     }
     .layout {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 420px;
+      grid-template-columns: 460px minmax(0, 1fr);
       gap: 18px;
       align-items: start;
     }
@@ -47,6 +47,7 @@
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
       .aux-sidebar { position: static; }
+      .groups-area { grid-template-columns: 1fr; }
     }
     .card {
       background: var(--card);
@@ -108,6 +109,37 @@
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 10px;
+    }
+    .groups-area {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 460px));
+      gap: 18px;
+      justify-content: start;
+      align-items: start;
+    }
+    .group-grid { display: contents; }
+    .group-card .row-head { margin-bottom: 8px; }
+    .groups-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      grid-column: 1 / -1;
+      margin: 2px 0 0;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: rgba(255,255,255,0.68);
+      box-shadow: 0 12px 34px rgba(0,0,0,0.06);
+      backdrop-filter: blur(14px);
+    }
+    .groups-head-left { display:flex; align-items:center; gap:10px; min-width:0; }
+    .groups-head h2 { margin: 0; font-size: 18px; letter-spacing: -0.02em; }
+    .pill.clash {
+      margin-left: 0;
+      background: linear-gradient(120deg, rgba(15,123,255,0.18), rgba(74,178,255,0.18));
+      color: #0b5ea8;
+      border: 1px solid rgba(15,123,255,0.24);
     }
     .chip-bar {
       border: 1px solid var(--border);
@@ -249,14 +281,11 @@
     <h1>DNSUnlock 控制台 <span class="pill">本地运行</span></h1>
     <p class="lead">规则来自 Clash 策略；为每个分流组选择“解析到的 IP”，或选择 DIRECT 使用上游 DNS。</p>
   </header>
-  <main>
-    <form method="POST" action="save_upstreams?${token_query}" class="layout">
-      <div class="main-stack">
-        ${category_blocks}
-      </div>
-      <aside class="aux-sidebar">
-        <section class="card">
-        <h2>IP / 上游 DNS 池</h2>
+	  <main>
+	    <form method="POST" action="save_upstreams?${token_query}" class="layout">
+	      <aside class="aux-sidebar">
+	        <section class="card">
+	        <h2>IP / 上游 DNS 池</h2>
         <div class="chip-bar">
           <div class="chip-head">
             <span style="color:var(--muted);font-size:13px;">IP 池（解析结果）</span>
@@ -312,11 +341,14 @@
             <button class="btn" type="button" id="add-dns">添加</button>
           </div>
         </div>
-        <p style="margin-top:10px;color:var(--muted);font-size:12px;">监听 DNS: ${listen_host}:${dns_port} · Web: ${web_host}:${web_port}</p>
-        </section>
-      </aside>
-    </form>
-  </main>
+	        <p style="margin-top:10px;color:var(--muted);font-size:12px;">监听 DNS: ${listen_host}:${dns_port} · Web: ${web_host}:${web_port}</p>
+	        </section>
+	      </aside>
+	      <div class="main-stack">
+	        ${category_blocks}
+	      </div>
+	    </form>
+	  </main>
   <div class="footer">DNSUnlock · Clash 分流 · DNS 解析覆写</div>
   <script>
     // Toast

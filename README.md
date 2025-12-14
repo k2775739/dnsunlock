@@ -15,7 +15,7 @@ python3 app.py
 
 - 支持读取 Clash 策略链接（`clash_profile_url`）：既支持订阅转换器常见的 `.ini`（ACL4SSR 风格），也支持标准 `config.yaml`
 - 以 `ip_pool` 作为“可选节点（proxies）”，分流组选择等同 Clash：选择某 IP = DNS 直接返回该 IP；选择 `DIRECT` = 使用当前上游 DNS 正常解析
-- `url-test` 组按 Clash 逻辑自动探测延迟并选最快节点（探测 URL 统一使用 `https://v46check.netvigator.com/ipcheck/test-ip.jsp` 进行访问）
+- `url-test` 组按 Clash 逻辑自动探测延迟并选最快节点（使用策略里配置的 `url`，例如 `http://www.gstatic.com/generate_204`）
 - IP 池探测支持 `netvigator` / `ifconfig` 两个站点（默认 `netvigator`），可在面板或 `config.json` 里通过 `ip_info_site` 切换
 - 策略与规则集带缓存（`clash_cache_dir`），面板“后台刷新策略”会重新拉取并生效
 
