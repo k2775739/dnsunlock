@@ -612,6 +612,7 @@
     function applyIpMeta(ip, info) {
       window.__ipMetaCache = window.__ipMetaCache || {};
       window.__ipMetaCache[ip] = info;
+      const dispMs = (info && Number.isFinite(info.ms)) ? Math.round(info.ms / 2) : null;
       // 更新 IP 池芯片
       const chip = document.querySelector(`#chip-list-ip .chip[data-ip="${ip}"]`);
       if (chip) {
@@ -621,13 +622,13 @@
           const parts = [];
           if (info.country_iso) parts.push(info.country_iso);
           if (info.asn_org) parts.push(info.asn_org);
-          if (Number.isFinite(info.ms)) parts.push(`${info.ms}ms`);
+          if (dispMs !== null) parts.push(`${dispMs}ms`);
           if (info.real_ip && info.real_ip !== ip) parts.push(info.real_ip);
           const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
           chip.textContent = `${ip}${extra}`;
         } else {
           chip.classList.add('fail');
-          const msPart = (info && Number.isFinite(info.ms)) ? ` · ${info.ms}ms` : '';
+          const msPart = (dispMs !== null) ? ` · ${dispMs}ms` : '';
           chip.textContent = `${ip}${msPart} · 错误`;
         }
       }
@@ -636,7 +637,7 @@
         if (opt.value === "__upstream__") return;
         const GREEN = '#0f7b31';
         const RED = '#c70000';
-        const msPart = (info && Number.isFinite(info.ms)) ? ` · ${info.ms}ms` : '';
+        const msPart = (dispMs !== null) ? ` · ${dispMs}ms` : '';
         if (info && info.ok) {
           const ccPart = info.country_iso ? ` · ${info.country_iso}` : '';
           opt.textContent = `${ip}${ccPart}${msPart}`;

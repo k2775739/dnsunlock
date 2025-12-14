@@ -1901,7 +1901,8 @@ class WebHandler(BaseHTTPRequestHandler):
                                                 except Exception:
                                                     ms_i = None
                                                 if ms_i is not None:
-                                                    parts[-1] = f"{last} · {ms_i}ms"
+                                                    ms_disp = (ms_i + 1) // 2 if ms_i >= 0 else ms_i
+                                                    parts[-1] = f"{last} · {ms_disp}ms"
                                     label = " -> ".join(parts)
                         except Exception:
                             pass
