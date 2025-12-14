@@ -856,10 +856,10 @@ class ConfigManager:
         self.geoip_cn_trie = None
         self.geoip_cn_loaded_at = 0
         self.reloading = False
+        # Load policy in background to avoid blocking startup (remote fetch + IP meta warmup can be slow).
         try:
-            self.reload_rules()
+            self.reload_rules_async(force=False)
         except Exception:
-            # keep running even if policy fetch fails; UI/API will report empty policy
             pass
 
     def save(self):
@@ -925,7 +925,7 @@ class ConfigManager:
         except Exception:
             pass
 
-    def reload_rules_async(self):
+    def reload_rules_async(self, force: bool = False):
         with self.lock:
             if self.reloading:
                 return False
@@ -933,7 +933,7 @@ class ConfigManager:
 
         def worker():
             try:
-                self.reload_rules(force=True)
+                self.reload_rules(force=force)
             finally:
                 with self.lock:
                     self.reloading = False
@@ -977,6 +977,14 @@ class ConfigManager:
             sel = self.config.get("clash_group_selection")
             if not isinstance(sel, dict):
                 sel = {}
+            # "__auto__" means remove manual override (use group default/auto behavior)
+            if selected in ("", "__auto__"):
+                if group not in sel:
+                    return False
+                sel.pop(group, None)
+                self.config["clash_group_selection"] = sel
+                self.save()
+                return True
             if sel.get(group) == selected:
                 return False
             sel[group] = selected
@@ -1076,10 +1084,102 @@ class ConfigManager:
             chosen_fallback = members[0] if members else "DIRECT"
             return self._resolve_member(chosen_fallback, proxies, seen)
         # url-test/fallback/load-balance -> auto pick by probing
+        # Allow manual override for non-select groups as well.
+        chosen = sel.get(name) if isinstance(sel, dict) else None
+        chosen = str(chosen or "").strip()
+        if chosen:
+            chosen_upper = chosen.upper()
+            if chosen_upper in ("DIRECT", "REJECT"):
+                return chosen_upper
+            if chosen in proxies:
+                return chosen
+            if is_valid_ip(chosen):
+                return chosen
+            if chosen in (pol.groups or {}):
+                return self._resolve_member(chosen, proxies, seen)
         members = materialize_group_members(group, proxies)
         candidates = [m for m in members if m in proxies]
         picked = self._urltest_pick(name, group, candidates) if candidates else "DIRECT"
         return self._resolve_member(picked, proxies, seen)
+
+    def resolve_chain(self, name: str, proxies: dict, max_depth: int = 12, allow_probe: bool = False) -> List[str]:
+        """Resolve a member into its final leaf and return the resolution chain.
+
+        Example:
+          '🎬 NETFLIX' member '🇸🇬 新加坡节点' -> ['🇸🇬 新加坡节点', '22.22.22.10']
+        """
+        cur = str(name or "").strip()
+        if not cur:
+            return ["DIRECT"]
+        chain: List[str] = []
+        seen: set = set()
+        for _ in range(max_depth):
+            chain.append(cur)
+            upper = cur.upper()
+            if upper in ("DIRECT", "REJECT"):
+                break
+            if cur in proxies:
+                break
+            if is_valid_ip(cur):
+                break
+
+            with self.lock:
+                pol = self.clash_policy
+                sel = self.config.get("clash_group_selection") if isinstance(self.config.get("clash_group_selection"), dict) else {}
+
+            if not pol or cur not in (pol.groups or {}):
+                chain.append("DIRECT")
+                break
+            if cur in seen:
+                chain.append("DIRECT")
+                break
+            seen.add(cur)
+
+            group = pol.groups.get(cur) or {}
+            gtype = _normalize_group_type(group.get("type"))
+
+            def valid_override(v: str) -> Optional[str]:
+                v = str(v or "").strip()
+                if not v or v == "__auto__":
+                    return None
+                vu = v.upper()
+                if vu in ("DIRECT", "REJECT"):
+                    return vu
+                if v in proxies:
+                    return v
+                if is_valid_ip(v):
+                    return v
+                if v in (pol.groups or {}):
+                    return v
+                return None
+
+            chosen = valid_override(sel.get(cur) if isinstance(sel, dict) else None)
+            if chosen:
+                cur = chosen
+                continue
+
+            members = materialize_group_members(group, proxies)
+            if gtype == "select":
+                cur = members[0] if members else "DIRECT"
+                continue
+
+            candidates = [m for m in members if m in proxies]
+            if not candidates:
+                cur = "DIRECT"
+                continue
+            if allow_probe:
+                cur = self._urltest_pick(cur, group, candidates)
+                continue
+            # cached-only: do not block page render; return AUTO if not yet tested
+            key = (cur, tuple(candidates))
+            with self.lock:
+                cached = self.urltest_cache.get(key) if isinstance(self.urltest_cache, dict) else None
+            picked = cached.get("selected") if isinstance(cached, dict) else None
+            cur = str(picked).strip() if picked else "AUTO"
+            if cur == "AUTO":
+                break
+
+        return chain
 
     def _eval_policy_target(self, qname: str, ip_objs=None):
         with self.lock:
@@ -1568,6 +1668,14 @@ class WebHandler(BaseHTTPRequestHandler):
                 "reloading": snap.get("reloading", False),
             }
             return self._send(200, json.dumps(info).encode("utf-8"), "application/json")
+        if path.endswith("api/group_section"):
+            _, cfg = self.cfg.get_snapshot()
+            ip_pool = cfg.get("ip_pool", []) or ["1.1.1.1"]
+            upstream_dns = cfg.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
+            # Do NOT block page render; use cached meta only (browser will refresh asynchronously).
+            ip_meta = self.cfg.peek_ip_meta()
+            html_section = self.render_group_section(cfg, ip_pool, upstream_dns, ip_meta)
+            return self._send(200, html_section.encode("utf-8"), "text/html; charset=utf-8")
         return self._send(200, self.render_dashboard().encode("utf-8"))
 
     def do_POST(self):
@@ -1634,7 +1742,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
             self.cfg.update_ip_pool(new_ip_pool, new_upstream_dns, new_upstream_pool)
         elif path.endswith("refresh_rules"):
-            started = self.cfg.reload_rules_async()
+            started = self.cfg.reload_rules_async(force=True)
             resp = {"started": started}
             self._send(202 if started else 200, json.dumps(resp).encode("utf-8"), "application/json")
             return
@@ -1647,8 +1755,8 @@ class WebHandler(BaseHTTPRequestHandler):
         ip_pool = cfg.get("ip_pool", []) or ["1.1.1.1"]
         upstream_dns = cfg.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
         upstream_pool = cfg.get("upstream_dns_pool", [upstream_dns])
-        # 分流组依赖 IP 元信息（国家/ISP）进行正则筛选，因此这里允许触发获取
-        ip_meta = self.cfg.get_ip_meta(force=False)
+        # 首屏避免阻塞：仅使用缓存的 IP 元信息；浏览器会异步刷新
+        ip_meta = self.cfg.peek_ip_meta()
         token = cfg.get("token", "")
         clash_profile_url = cfg.get("clash_profile_url", DEFAULT_CONFIG["clash_profile_url"])
         policy_kind = cfg.get("policy_kind") or "-"
@@ -1657,63 +1765,7 @@ class WebHandler(BaseHTTPRequestHandler):
         policy_provider_count = cfg.get("policy_provider_count", 0)
         loaded_at_raw = cfg.get("rules_loaded_at", 0)
         loaded_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(loaded_at_raw))
-
-        def group_select(name: str, current: str, members: list):
-            safe_name = html.escape(name, quote=True)
-            opts = []
-            for m in members:
-                m_str = str(m)
-                m_val = html.escape(m_str, quote=True)
-                label = m_str
-                if m_str.upper() == "DIRECT":
-                    label = f"DIRECT（上游DNS {upstream_dns}）"
-                sel_attr = " selected" if m_str == current else ""
-                opts.append(f'<option value="{m_val}"{sel_attr}>{html.escape(label)}</option>')
-            return f'<select name="{safe_name}" class="select">{"".join(opts)}</select>'
-
-        # --- Clash 分流组 ---
-        group_rows = []
-        with self.cfg.lock:
-            pol = self.cfg.clash_policy
-            sel_map = self.cfg.config.get("clash_group_selection") if isinstance(self.cfg.config.get("clash_group_selection"), dict) else {}
-        rules_by_target = {}
-        if pol:
-            for r in pol.rules or []:
-                target = r.get("target")
-                if not target:
-                    continue
-                inc = 1
-                if r.get("kind") == "RULE-SET":
-                    prov_key = r.get("value")
-                    prov = (pol.providers or {}).get(prov_key)
-                    inc = int(getattr(prov, "count", 0) or 0)
-                rules_by_target[target] = rules_by_target.get(target, 0) + inc
-        proxies = build_proxy_catalog(ip_pool, ip_meta)
-        if pol and isinstance(getattr(pol, "groups", None), dict):
-            for gname, g in pol.groups.items():
-                gtype = _normalize_group_type(g.get("type"))
-                if gtype != "select":
-                    continue
-                members = materialize_group_members(g, proxies)
-                if not members:
-                    members = ["DIRECT"]
-                current = str(sel_map.get(gname) or "").strip()
-                if current and current not in members:
-                    members = [current] + members
-                if not current:
-                    current = members[0]
-                rules_cnt = rules_by_target.get(gname, 0)
-                badge = f"<span class='pill' title='该分组命中的规则条数'>{rules_cnt} 条规则</span>"
-                group_rows.append(
-                    "<div class=\"row\">"
-                    f"<div class=\"row-head\"><span>{html.escape(gname)}</span>{badge}</div>"
-                    f"{group_select('selg__' + gname, current, members)}"
-                    "</div>"
-                )
-        if not group_rows:
-            group_html = '<section class="card"><h2>分流组选择（Clash）</h2><p style="color:var(--muted);">未加载策略或策略无可选分组。</p></section>'
-        else:
-            group_html = f'<section class="card"><h2>分流组选择（Clash）</h2>{"".join(group_rows)}</section>'
+        group_html = self.render_group_section(cfg, ip_pool, upstream_dns, ip_meta)
 
         # pre-fill chip text; color will be set by JS after拉取 /api/ipinfo
         ip_chips = "".join([f'<span class="chip" data-ip="{ip}">{ip}</span>' for ip in ip_pool])
@@ -1745,6 +1797,103 @@ class WebHandler(BaseHTTPRequestHandler):
             token=token,
             token_query=f"token={token}",
         )
+
+    def render_group_section(self, cfg: dict, ip_pool: list, upstream_dns: str, ip_meta: dict) -> str:
+        """Render the Clash group selector section (HTML)."""
+        with self.cfg.lock:
+            pol = self.cfg.clash_policy
+            sel_map = self.cfg.config.get("clash_group_selection") if isinstance(self.cfg.config.get("clash_group_selection"), dict) else {}
+
+        proxies = build_proxy_catalog(ip_pool, ip_meta)
+
+        def group_select(name: str, current: str, members: list, group_type: str):
+            safe_name = html.escape(name, quote=True)
+            opts = []
+            for m in members:
+                m_str = str(m)
+                m_val = html.escape(m_str, quote=True)
+                label = m_str
+                if m_str == "__auto__":
+                    label = f"AUTO（{group_type}）"
+                else:
+                    if m_str.upper() == "DIRECT":
+                        label = f"DIRECT（上游DNS {upstream_dns}）"
+                    else:
+                        try:
+                            if pol and isinstance(getattr(pol, "groups", None), dict) and m_str in pol.groups:
+                                chain = self.cfg.resolve_chain(m_str, proxies, allow_probe=False)
+                                if chain:
+                                    parts = [str(x) for x in chain]
+                                    if parts and str(parts[-1]).upper() == "DIRECT":
+                                        parts[-1] = f"DIRECT（上游DNS {upstream_dns}）"
+                                    label = " -> ".join(parts)
+                        except Exception:
+                            pass
+                sel_attr = " selected" if m_str == current else ""
+                opts.append(f'<option value="{m_val}"{sel_attr}>{html.escape(label)}</option>')
+            return f'<select name="{safe_name}" class="select">{"".join(opts)}</select>'
+
+        # Count rules hit by each target (for UI badge only)
+        rules_by_target = {}
+        if pol:
+            for r in pol.rules or []:
+                target = r.get("target")
+                if not target:
+                    continue
+                inc = 1
+                if r.get("kind") == "RULE-SET":
+                    prov_key = r.get("value")
+                    prov = (pol.providers or {}).get(prov_key)
+                    inc = int(getattr(prov, "count", 0) or 0)
+                rules_by_target[target] = rules_by_target.get(target, 0) + inc
+
+        # --- Clash groups ---
+        group_rows = []
+        if pol and isinstance(getattr(pol, "groups", None), dict):
+            for gname, g in pol.groups.items():
+                gtype = _normalize_group_type(g.get("type"))
+                if gtype not in ("select", "url-test", "fallback", "load-balance"):
+                    continue
+
+                current = str(sel_map.get(gname) or "").strip()
+                if gtype == "select":
+                    members = materialize_group_members(g, proxies)
+                    if not members:
+                        members = ["DIRECT"]
+                    if current and current not in members:
+                        members = [current] + members
+                    if not current:
+                        current = members[0]
+                else:
+                    members = materialize_group_members(g, proxies)
+                    candidates = [m for m in members if m in proxies]
+                    if not candidates:
+                        candidates = list(proxies.keys())
+                    members = ["__auto__", "DIRECT"] + candidates
+                    if not current or current == "__auto__":
+                        current = "__auto__"
+                    elif current not in members:
+                        members = [current] + members
+
+                rules_cnt = rules_by_target.get(gname, 0)
+                type_badge = f"<span class='pill' title='分组类型'>{html.escape(gtype)}</span>"
+                rules_badge = f"<span class='pill' title='该分组命中的规则条数'>{rules_cnt} 条规则</span>" if rules_cnt else ""
+                badge = f"{type_badge}{rules_badge}"
+                group_rows.append(
+                    "<div class=\"row\">"
+                    f"<div class=\"row-head\"><span>{html.escape(gname)}</span>{badge}</div>"
+                    f"{group_select('selg__' + gname, current, members, gtype)}"
+                    "</div>"
+                )
+
+        if not group_rows:
+            if cfg.get("reloading"):
+                msg = "策略加载中，请稍候…"
+            else:
+                msg = "未加载策略或策略无可选分组。"
+            return f'<section class="card" id="clash-groups"><h2>分流组选择（Clash）</h2><p style="color:var(--muted);">{html.escape(msg)}</p></section>'
+
+        return f'<section class="card" id="clash-groups"><h2>分流组选择（Clash）</h2>{"".join(group_rows)}</section>'
 
 
 # ---------- Server bootstrap ----------

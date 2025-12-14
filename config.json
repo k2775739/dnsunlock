@@ -10,7 +10,8 @@
   "clash_group_selection": {
     "\u267b\ufe0f \u624b\u52a8\u5207\u6362": "22.22.22.14",
     "\ud83c\udfac NETFLIX": "\u267b\ufe0f \u624b\u52a8\u5207\u6362",
-    "\ud83c\udf0d \u5176\u4ed6\u5730\u533a": "22.22.22.10"
+    "\ud83c\udf0d \u5176\u4ed6\u5730\u533a": "22.22.22.10",
+    "\ud83c\udded\ud83c\uddf0 \u9999\u6e2f\u8282\u70b9": "DIRECT"
   },
   "geoip_cn_url": "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt",
   "token": "axfswdgbby20",

@@ -413,8 +413,10 @@
           body: params.toString(),
         });
         showToast('已更新');
+        return true;
       } catch (e) {
         showToast('更新失败');
+        return false;
       }
     }
 
@@ -424,25 +426,28 @@
       return ip.split('.').every(o => Number(o) >= 0 && Number(o) <= 255);
     }
 
-    function submitIpPool() {
+    async function submitIpPool() {
       const p = new URLSearchParams();
       p.set('ip_pool', getIps().join('\\n'));
-      postParams(p);
+      const ok = await postParams(p);
+      if (ok) refreshGroupSection();
     }
 
-    function submitDnsPool(includeActive = true) {
+    async function submitDnsPool(includeActive = true) {
       const p = new URLSearchParams();
       p.set('upstream_dns_pool', getDns().join('\\n'));
       if (includeActive) {
         p.set('upstream_dns', window.activeUpstream || '${upstream_dns}');
       }
-      postParams(p);
+      const ok = await postParams(p);
+      if (ok) refreshGroupSection();
     }
 
-    function submitUpstreamDnsOnly() {
+    async function submitUpstreamDnsOnly() {
       const p = new URLSearchParams();
       p.set('upstream_dns', window.activeUpstream || '${upstream_dns}');
-      postParams(p);
+      const ok = await postParams(p);
+      if (ok) refreshGroupSection();
     }
 
     // IP 探测：优先使用后端缓存；若无缓存则页面加载完后再异步刷新，避免首屏阻塞
@@ -487,20 +492,73 @@
       pollRules(initialRulesTs || 0);
     });
 
-    // 仅更新当前变动：分流组下拉改变 -> 只发该项；DNS激活 -> 只发upstream_dns；
-    // IP/DNS池增删 -> 只发对应池（DNS池还会带上当前上游）。
-    document.querySelectorAll('select[name^="selg__"]').forEach(sel => {
-      sel.addEventListener('change', () => {
-        const p = new URLSearchParams();
-        p.set(sel.name, sel.value);
-        postParams(p);
-        updateSelectColor(sel);
-      });
+    // ---- Clash 分流组：动态刷新分组区块（避免手动刷新网页） ----
+    let groupSectionRefreshing = false;
+    let groupSectionRefreshPending = false;
+    async function refreshGroupSection() {
+      if (groupSectionRefreshing) {
+        groupSectionRefreshPending = true;
+        return;
+      }
+      groupSectionRefreshing = true;
+      try {
+        const res = await fetch('./api/group_section?${token_query}');
+        const html = await res.text();
+        const tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        const next = tmp.firstElementChild;
+        const cur = document.getElementById('clash-groups');
+        if (cur && next) {
+          cur.replaceWith(next);
+        }
+        // 重新应用已探测到的 IP 元信息（更新新插入的 option 文本/颜色）
+        if (window.__ipMetaCache) {
+          Object.entries(window.__ipMetaCache).forEach(([ip, info]) => applyIpMeta(ip, info));
+        }
+        // 同步 select 颜色
+        document.querySelectorAll('select[name^="selg__"]').forEach(sel => updateSelectColor(sel));
+      } catch (_) {
+        // ignore
+      } finally {
+        groupSectionRefreshing = false;
+        if (groupSectionRefreshPending) {
+          groupSectionRefreshPending = false;
+          refreshGroupSection();
+        }
+      }
+    }
+
+    // 分流组下拉改变 -> 只发该项，并刷新分组区块（更新关联显示）
+    form.addEventListener('change', async (e) => {
+      const sel = e.target;
+      if (!(sel && sel.tagName === 'SELECT' && (sel.name || '').startsWith('selg__'))) return;
+      const p = new URLSearchParams();
+      p.set(sel.name, sel.value);
+      const ok = await postParams(p);
       updateSelectColor(sel);
+      if (ok) refreshGroupSection();
     });
+    // 首次渲染后同步一次颜色
+    document.querySelectorAll('select[name^="selg__"]').forEach(sel => updateSelectColor(sel));
+
+    // 启动时策略可能仍在后台加载：加载完成后自动刷新分组区块
+    (function pollRulesForGroups(tsBefore) {
+      fetch('./api/rules_info?${token_query}')
+        .then(r => r.json())
+        .then(info => {
+          if (!info.reloading && info.rules_loaded_at && info.rules_loaded_at >= tsBefore) {
+            refreshGroupSection();
+            return;
+          }
+          setTimeout(() => pollRulesForGroups(tsBefore), 1000);
+        })
+        .catch(() => setTimeout(() => pollRulesForGroups(tsBefore), 1000));
+    })(initialRulesTs || 0);
 
     // ---- IP健康探测 ----
     function applyIpMeta(ip, info) {
+      window.__ipMetaCache = window.__ipMetaCache || {};
+      window.__ipMetaCache[ip] = info;
       // 更新 IP 池芯片
       const chip = document.querySelector(`#chip-list-ip .chip[data-ip="${ip}"]`);
       if (chip) {
