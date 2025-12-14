@@ -26,10 +26,27 @@
     h1 { margin: 0; font-weight: 700; letter-spacing: -0.02em; }
     p.lead { margin: 6px 0 0; color: var(--muted); }
     main {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 18px;
       padding: 12px 4vw 36px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 420px;
+      gap: 18px;
+      align-items: start;
+    }
+    .main-stack {
+      display: grid;
+      gap: 18px;
+      align-content: start;
+    }
+    .aux-sidebar {
+      position: sticky;
+      top: 18px;
+      align-self: start;
+    }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .aux-sidebar { position: static; }
     }
     .card {
       background: var(--card);
@@ -233,8 +250,12 @@
     <p class="lead">规则来自 Clash 策略；为每个分流组选择“解析到的 IP”，或选择 DIRECT 使用上游 DNS。</p>
   </header>
   <main>
-    <form method="POST" action="save_upstreams?${token_query}" style="display:contents;">
-      <section class="card">
+    <form method="POST" action="save_upstreams?${token_query}" class="layout">
+      <div class="main-stack">
+        ${category_blocks}
+      </div>
+      <aside class="aux-sidebar">
+        <section class="card">
         <h2>IP / 上游 DNS 池</h2>
         <div class="chip-bar">
           <div class="chip-head">
@@ -292,8 +313,8 @@
           </div>
         </div>
         <p style="margin-top:10px;color:var(--muted);font-size:12px;">监听 DNS: ${listen_host}:${dns_port} · Web: ${web_host}:${web_port}</p>
-      </section>
-      ${category_blocks}
+        </section>
+      </aside>
     </form>
   </main>
   <div class="footer">DNSUnlock · Clash 分流 · DNS 解析覆写</div>
@@ -568,12 +589,14 @@
           const parts = [];
           if (info.country_iso) parts.push(info.country_iso);
           if (info.asn_org) parts.push(info.asn_org);
+          if (Number.isFinite(info.ms)) parts.push(`${info.ms}ms`);
           if (info.real_ip && info.real_ip !== ip) parts.push(info.real_ip);
           const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
           chip.textContent = `${ip}${extra}`;
         } else {
           chip.classList.add('fail');
-          chip.textContent = `${ip}· 错误`;
+          const msPart = (info && Number.isFinite(info.ms)) ? ` · ${info.ms}ms` : '';
+          chip.textContent = `${ip}${msPart} · 错误`;
         }
       }
       // 同步更新所有下拉选项的显示与颜色
@@ -581,8 +604,10 @@
         if (opt.value === "__upstream__") return;
         const GREEN = '#0f7b31';
         const RED = '#c70000';
-        if (info && info.ok && info.country_iso) {
-          opt.textContent = `${ip} · ${info.country_iso}`;
+        const msPart = (info && Number.isFinite(info.ms)) ? ` · ${info.ms}ms` : '';
+        if (info && info.ok) {
+          const ccPart = info.country_iso ? ` · ${info.country_iso}` : '';
+          opt.textContent = `${ip}${ccPart}${msPart}`;
           opt.classList.add('ok');
           opt.classList.remove('fail');
           opt.style.color = GREEN;
@@ -590,7 +615,7 @@
             opt.parentElement.style.color = GREEN;
           }
         } else {
-          opt.textContent = `${ip}· 错误`;
+          opt.textContent = `${ip}${msPart} · 错误`;
           opt.classList.add('fail');
           opt.classList.remove('ok');
           opt.style.color = RED;
@@ -610,13 +635,16 @@
         });
         showToast('正在刷新 IP 探测...');
       }
-      chips.forEach(chip => {
+      const tasks = chips.map(chip => {
         const ip = chip.dataset.ip;
-        fetch(`./api/ipinfo?${token_query}&ip=${encodeURIComponent(ip)}${force ? '&refresh=1' : ''}`)
+        return fetch(`./api/ipinfo?${token_query}&ip=${encodeURIComponent(ip)}${force ? '&refresh=1' : ''}`)
           .then(r => r.json())
           .then(data => applyIpMeta(ip, data))
           .catch(() => applyIpMeta(ip, {ok:false}));
       });
+      if (tasks.length) {
+        Promise.allSettled(tasks).then(() => refreshGroupSection());
+      }
     }
     refreshIpMeta();
 

@@ -77,10 +77,11 @@ def _fetch_ip_meta_ifconfig(ip: str, timeout: float = 6.0) -> dict:
     """Query ifconfig.co/json via the target IP (curl --resolve).
 
     Returns dict:
-      {ok, ip, real_ip, country_iso, asn_org, source}
+      {ok, ip, real_ip, country_iso, asn_org, source, ms}
     """
     if not is_valid_ip(ip):
         return {"ok": False, "ip": ip, "source": "ifconfig"}
+    start = time.monotonic()
     cmd = [
         "curl",
         "--resolve",
@@ -94,6 +95,7 @@ def _fetch_ip_meta_ifconfig(ip: str, timeout: float = 6.0) -> dict:
     ]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout + 1)
+        ms = int((time.monotonic() - start) * 1000)
         data = json.loads(out.decode("utf-8", errors="ignore").strip() or "{}")
         return {
             "ok": True,
@@ -102,9 +104,11 @@ def _fetch_ip_meta_ifconfig(ip: str, timeout: float = 6.0) -> dict:
             "country_iso": data.get("country_iso"),
             "asn_org": data.get("asn_org"),
             "source": "ifconfig",
+            "ms": ms,
         }
     except Exception:
-        return {"ok": False, "ip": ip, "source": "ifconfig"}
+        ms = int((time.monotonic() - start) * 1000)
+        return {"ok": False, "ip": ip, "source": "ifconfig", "ms": ms}
 
 
 def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
@@ -114,10 +118,11 @@ def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
       {"resultCode":"6","ip":"2400:...","countryCode":"HK","isp":"null"}
 
     Returns dict:
-      {ok, ip, real_ip, country_iso, asn_org, source, result_code}
+      {ok, ip, real_ip, country_iso, asn_org, source, result_code, ms}
     """
     if not is_valid_ip(ip):
         return {"ok": False, "ip": ip, "source": "netvigator"}
+    start = time.monotonic()
     cmd = [
         "curl",
         "--resolve",
@@ -131,6 +136,7 @@ def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
     ]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout + 1)
+        ms = int((time.monotonic() - start) * 1000)
         raw = out.decode("utf-8", errors="ignore").strip()
         data = json.loads(raw or "{}")
         real_ip = data.get("ip")
@@ -148,9 +154,11 @@ def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
             "asn_org": isp,
             "source": "netvigator",
             "result_code": result_code,
+            "ms": ms,
         }
     except Exception:
-        return {"ok": False, "ip": ip, "source": "netvigator"}
+        ms = int((time.monotonic() - start) * 1000)
+        return {"ok": False, "ip": ip, "source": "netvigator", "ms": ms}
 
 
 def fetch_ip_meta(ip: str, timeout: float = 6.0, site: str = "netvigator") -> dict:
@@ -1814,7 +1822,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 m_val = html.escape(m_str, quote=True)
                 label = m_str
                 if m_str == "__auto__":
-                    label = f"AUTO（{group_type}）"
+                    label = "AUTO"
                 else:
                     if m_str.upper() == "DIRECT":
                         label = f"DIRECT（上游DNS {upstream_dns}）"
@@ -1826,6 +1834,19 @@ class WebHandler(BaseHTTPRequestHandler):
                                     parts = [str(x) for x in chain]
                                     if parts and str(parts[-1]).upper() == "DIRECT":
                                         parts[-1] = f"DIRECT（上游DNS {upstream_dns}）"
+                                    # show latency on the final IP (if available in cached ip_meta)
+                                    if parts:
+                                        last = str(parts[-1])
+                                        if is_valid_ip(last) and isinstance(ip_meta, dict):
+                                            meta = ip_meta.get(last)
+                                            if isinstance(meta, dict):
+                                                ms = meta.get("ms")
+                                                try:
+                                                    ms_i = int(ms)
+                                                except Exception:
+                                                    ms_i = None
+                                                if ms_i is not None:
+                                                    parts[-1] = f"{last} · {ms_i}ms"
                                     label = " -> ".join(parts)
                         except Exception:
                             pass
@@ -1876,9 +1897,8 @@ class WebHandler(BaseHTTPRequestHandler):
                         members = [current] + members
 
                 rules_cnt = rules_by_target.get(gname, 0)
-                type_badge = f"<span class='pill' title='分组类型'>{html.escape(gtype)}</span>"
-                rules_badge = f"<span class='pill' title='该分组命中的规则条数'>{rules_cnt} 条规则</span>" if rules_cnt else ""
-                badge = f"{type_badge}{rules_badge}"
+                rules_badge = f"<span class='pill' title='该分组命中的规则条数'>{int(rules_cnt or 0)} 条规则</span>"
+                badge = rules_badge
                 group_rows.append(
                     "<div class=\"row\">"
                     f"<div class=\"row-head\"><span>{html.escape(gname)}</span>{badge}</div>"
