@@ -245,6 +245,8 @@
     .row-head { display:flex; justify-content:space-between; align-items:center; font-size:13px; color:var(--text); margin-bottom:6px; }
     .footer { padding: 0 4vw 28px; color: var(--muted); font-size: 12px; }
     .input-row { display:flex; gap:8px; margin-top:10px; align-items:stretch; }
+    .policy-controls { flex-wrap: wrap; }
+    .policy-controls select.ghost-btn { flex: 1 1 240px; min-width: 0; }
     .input-row input {
       flex:1;
       border:1px solid var(--border);
@@ -360,25 +362,27 @@
           </div>
         </div>
 
-	        <div class="chip-bar" style="margin-top:14px;">
-	          <div class="chip-head">
-	            <span style="color:var(--muted);font-size:13px;">Clash 策略（自动加载）</span>
-	            <div class="chip-actions">
-	              <button type="button" class="ghost-btn" id="refresh-rules-btn">后台刷新</button>
-	            </div>
-	          </div>
-	          <div class="input-row">
-              <select id="clash-profile-source" class="ghost-btn" title="选择策略来源">
-                <option value="local">本地（${local_policy_filename}）</option>
-                <option value="remote">网络链接</option>
-              </select>
-              <button type="button" class="ghost-btn" id="edit-local-policy">编辑本地配置</button>
-              <button class="btn" type="button" id="save-policy-settings">保存</button>
-	          </div>
-            <div id="remote-policy-box" style="margin-top:10px;">
-              <label>网络策略链接</label>
-              <div class="input-row">
-                <input id="clash-profile-url" placeholder="输入 Clash 策略链接（仅支持 http/https）" value="${clash_profile_url}" />
+		        <div class="chip-bar" style="margin-top:14px;">
+		          <div class="chip-head">
+		            <span style="color:var(--muted);font-size:13px;">Clash 策略（自动加载）</span>
+		            <div class="chip-actions">
+		              <button type="button" class="ghost-btn" id="refresh-rules-btn">后台刷新</button>
+		            </div>
+		          </div>
+		          <div class="input-row policy-controls">
+	              <select id="clash-profile-source" class="ghost-btn" title="选择策略来源">
+	                <option value="local">本地（${local_policy_filename}）</option>
+	                <option value="remote">网络链接</option>
+	              </select>
+	              <button class="btn" type="button" id="save-policy-settings">保存</button>
+		          </div>
+              <div class="input-row" id="local-policy-box" style="margin-top:8px;">
+                <button type="button" class="ghost-btn" id="edit-local-policy">编辑本地配置</button>
+              </div>
+	            <div id="remote-policy-box" style="margin-top:10px;">
+	              <label>网络策略链接</label>
+	              <div class="input-row">
+	                <input id="clash-profile-url" placeholder="输入 Clash 策略链接（仅支持 http/https）" value="${clash_profile_url}" />
               </div>
               <p style="color:var(--muted);font-size:12px;margin:8px 0 0;">安全限制：拒绝 file:// / localhost / 内网地址；若策略包含规则集链接，也会同样校验。</p>
             </div>
@@ -620,6 +624,7 @@
     // ---- Clash 策略来源（本地 / 网络） ----
     const policySourceSel = document.getElementById('clash-profile-source');
     const remotePolicyBox = document.getElementById('remote-policy-box');
+    const localPolicyBox = document.getElementById('local-policy-box');
     const editLocalPolicyBtn = document.getElementById('edit-local-policy');
     const savePolicyBtn = document.getElementById('save-policy-settings');
 
@@ -634,7 +639,7 @@
     function syncPolicyUi() {
       const src = normalizePolicySource(policySourceSel?.value);
       if (remotePolicyBox) remotePolicyBox.style.display = (src === 'remote') ? 'block' : 'none';
-      if (editLocalPolicyBtn) editLocalPolicyBtn.style.display = (src === 'local') ? 'inline-flex' : 'none';
+      if (localPolicyBox) localPolicyBox.style.display = (src === 'local') ? 'flex' : 'none';
     }
     policySourceSel?.addEventListener('change', syncPolicyUi);
     syncPolicyUi();
