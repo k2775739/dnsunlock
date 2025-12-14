@@ -105,6 +105,24 @@
       margin-bottom: 6px;
     }
     .chip-actions { display:flex; gap:6px; }
+    .chip-head.multi {
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: flex-start;
+      gap: 8px;
+    }
+    .chip-head.multi .chip-head-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .chip-head.multi .chip-head-row.right { justify-content: flex-end; }
+    .chip-head.multi .chip-head-row.right .chip-actions {
+      flex: 1;
+      width: 100%;
+      justify-content: flex-end;
+    }
+    .chip-actions .ghost-btn { margin-left: 0; }
     .chips {
       display: flex;
       flex-wrap: wrap;
@@ -163,8 +181,10 @@
       color: var(--text);
       cursor: pointer;
       font-size: 13px;
-      margin-left: 6px;
+      width: auto;
+      white-space: nowrap;
     }
+    #ipinfo-site { width: auto; min-width: 0; }
     .ghost-btn.danger { border-color: #ffb3b3; color: #b20000; }
     .row { margin-bottom: 10px; }
     .row-head { display:flex; justify-content:space-between; align-items:center; font-size:13px; color:var(--text); margin-bottom:6px; }
@@ -210,7 +230,7 @@
 <body>
   <header>
     <h1>DNSUnlock 控制台 <span class="pill">本地运行</span></h1>
-    <p class="lead">规则自动来自 ios_rule_script；为每个分类选择“解析到的 IP”，或转发到上游 DNS。</p>
+    <p class="lead">规则来自 Clash 策略；为每个分流组选择“解析到的 IP”，或选择 DIRECT 使用上游 DNS。</p>
   </header>
   <main>
     <form method="POST" action="save_upstreams?${token_query}" style="display:contents;">
@@ -220,9 +240,13 @@
           <div class="chip-head">
             <span style="color:var(--muted);font-size:13px;">IP 池（解析结果）</span>
             <div class="chip-actions">
-              <button type="button" class="ghost-btn" id="refresh-ipinfo">刷新探测</button>
               <button type="button" class="ghost-btn" id="edit-toggle-ip">编辑</button>
               <button type="button" class="ghost-btn danger" id="delete-selected-ip" style="display:none;">删除选中</button>
+              <button type="button" class="ghost-btn" id="refresh-ipinfo">刷新探测</button>
+              <select id="ipinfo-site" class="ghost-btn" title="选择 IP 探测站点">
+                <option value="netvigator">netvigator</option>
+                <option value="ifconfig">ifconfig</option>
+              </select>
             </div>
           </div>
           <div class="chips" id="chip-list-ip">
@@ -232,6 +256,23 @@
             <input name="ip_input" id="ip-input" placeholder="输入 IP 后点击添加" inputmode="numeric" pattern="^(\d{1,3}\.){3}\d{1,3}$" title="仅允许IPv4地址" />
             <button class="btn" type="button" id="add-ip">添加</button>
           </div>
+        </div>
+
+        <div class="chip-bar" style="margin-top:14px;">
+          <div class="chip-head">
+            <span style="color:var(--muted);font-size:13px;">Clash 策略（自动加载）</span>
+            <div class="chip-actions">
+              <button type="button" class="ghost-btn" id="refresh-rules-btn">后台刷新</button>
+            </div>
+          </div>
+          <label>策略链接</label>
+          <div class="input-row">
+            <input id="clash-profile-url" placeholder="输入 Clash 策略链接" value="${clash_profile_url}" />
+            <button class="btn" type="button" id="save-profile-url">保存</button>
+          </div>
+          <p style="color:var(--muted);">类型: <code>${policy_kind}</code> · 分组: ${policy_group_count} · 规则集: ${policy_provider_count} · 规则: ${policy_rule_count}</p>
+          <p style="color:var(--muted);">最近刷新: ${loaded_at}</p>
+          <p style="margin-top:8px;color:var(--muted);font-size:12px;">说明：本项目仅做 DNS 解析覆写，使用 Clash 分流组/规则来决定“解析到哪个 IP”或“上游DNS”。</p>
         </div>
 
         <div class="chip-bar" style="margin-top:14px;">
@@ -254,17 +295,8 @@
       </section>
       ${category_blocks}
     </form>
-
-    <section class="card">
-        <h2>规则状态（自动加载）</h2>
-        <p style="color:var(--muted);">来源目录: <code>${rules_root}</code></p>
-        <p style="color:var(--muted);">已加载: ${rule_summary}</p>
-        <p style="color:var(--muted);">最近刷新: ${loaded_at}</p>
-        <button class="btn" type="button" id="refresh-rules-btn">后台刷新规则</button>
-        <p style="margin-top:8px;color:var(--muted);font-size:12px;">规则内容不在面板显示；请在本地同步/更新 blackmatrix7/ios_rule_script 后点击刷新。</p>
-      </section>
   </main>
-  <div class="footer">DNSUnlock · 规则来自 ios_rule_script · 选择式分流</div>
+  <div class="footer">DNSUnlock · Clash 分流 · DNS 解析覆写</div>
   <script>
     // Toast
     const toast = document.createElement('div');
@@ -357,6 +389,19 @@
 
     document.getElementById('refresh-ipinfo')?.addEventListener('click', () => refreshIpMeta(true));
 
+    // IP 探测站点选择
+    const ipInfoSiteSel = document.getElementById('ipinfo-site');
+    if (ipInfoSiteSel) {
+      const currentSite = ('${ip_info_site}' || 'netvigator').toLowerCase();
+      ipInfoSiteSel.value = (currentSite === 'ifconfig') ? 'ifconfig' : 'netvigator';
+      ipInfoSiteSel.addEventListener('change', async () => {
+        const p = new URLSearchParams();
+        p.set('ip_info_site', ipInfoSiteSel.value);
+        await postParams(p);
+        refreshIpMeta(true);
+      });
+    }
+
     const form = document.querySelector('form[action="save_upstreams?${token_query}"]');
     form.addEventListener('submit', e => e.preventDefault());
 
@@ -408,7 +453,7 @@
       window.addEventListener('load', () => setTimeout(() => refreshIpMeta(true), 300));
     }
 
-    // 规则后台刷新：发起后轮询状态，成功再刷新页面
+    // 策略后台刷新：发起后轮询状态，成功再刷新页面
     const rulesBtn = document.getElementById('refresh-rules-btn');
     const initialRulesTs = Number('${loaded_at_ts}');
     async function pollRules(tsBefore) {
@@ -423,16 +468,28 @@
       setTimeout(() => pollRules(tsBefore), 1000);
     }
     rulesBtn?.addEventListener('click', async () => {
-      showToast('后台刷新规则中...');
+      showToast('后台刷新策略中...');
       try {
         await fetch('./refresh_rules?${token_query}', {method: 'POST'});
       } catch (_) {}
       pollRules(initialRulesTs || 0);
     });
 
-    // 仅更新当前变动：下拉改变 -> 只发该项；DNS激活 -> 只发upstream_dns；
+    // 保存策略链接后自动触发刷新
+    document.getElementById('save-profile-url')?.addEventListener('click', async () => {
+      const input = document.getElementById('clash-profile-url');
+      const url = (input?.value || '').trim();
+      if (!url) { showToast('请输入策略链接'); return; }
+      const p = new URLSearchParams();
+      p.set('clash_profile_url', url);
+      await postParams(p);
+      try { await fetch('./refresh_rules?${token_query}', {method: 'POST'}); } catch (_) {}
+      pollRules(initialRulesTs || 0);
+    });
+
+    // 仅更新当前变动：分流组下拉改变 -> 只发该项；DNS激活 -> 只发upstream_dns；
     // IP/DNS池增删 -> 只发对应池（DNS池还会带上当前上游）。
-    document.querySelectorAll('select[name^="sel_"]').forEach(sel => {
+    document.querySelectorAll('select[name^="selg__"]').forEach(sel => {
       sel.addEventListener('change', () => {
         const p = new URLSearchParams();
         p.set(sel.name, sel.value);

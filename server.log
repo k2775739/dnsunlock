@@ -1,0 +1,2 @@
+[DNS] listening on 0.0.0.0:53
+[WEB] open http://0.0.0.0:22004 to manage rules

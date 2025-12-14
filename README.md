@@ -1,6 +1,6 @@
 # DNSUnlock
 
-纯 Python 的本地 DNS 分流器，内置苹果风格 Web 面板。域名规则直接读取本地的 `blackmatrix7/ios_rule_script` 列表（不在面板显示），为各分类及其子服务选择“解析到的 IP”（不是上游 DNS）。
+纯 Python 的本地 DNS 分流器，内置苹果风格 Web 面板。使用 Clash 的「分流规则 + 分流组」来决定域名解析结果：解析到某个 `ip_pool` 的 IP（覆写 A/AAAA），或 `DIRECT` 走上游 DNS。
 
 ## 运行
 
@@ -13,10 +13,11 @@ python3 app.py
 
 ## 功能
 
-- 按类别分流：流媒体、AI、主站点、剩余、默认；每个类别下主流服务可单独选择 IP（如 ChatGPT 选 22.22.22.10，Grok 选 22.22.22.16）
-- IP 池可编辑，匹配到的域名可选择直接解析成某个 IPv4，或选择“上游DNS”转发到配置的上游 DNS
-- 规则自动读取 `rules/` 目录下的 ios_rule_script `.list` 文件，按文件名自动归类到服务：YouTube/Netflix/Disney/HBO/Prime… →流媒体；OpenAI/Gemini/Claude/Copilot/Perplexity/Grok/Midjourney… →AI；Google/Microsoft/Cloudflare… →主站
-- 配置持久化到 `config.json`；规则刷新按钮可重新扫描本地规则仓库
+- 支持读取 Clash 策略链接（`clash_profile_url`）：既支持订阅转换器常见的 `.ini`（ACL4SSR 风格），也支持标准 `config.yaml`
+- 以 `ip_pool` 作为“可选节点（proxies）”，分流组选择等同 Clash：选择某 IP = DNS 直接返回该 IP；选择 `DIRECT` = 使用当前上游 DNS 正常解析
+- `url-test` 组按 Clash 逻辑自动探测延迟并选最快节点（探测 URL 统一使用 `https://v46check.netvigator.com/ipcheck/test-ip.jsp` 进行访问）
+- IP 池探测支持 `netvigator` / `ifconfig` 两个站点（默认 `netvigator`），可在面板或 `config.json` 里通过 `ip_info_site` 切换
+- 策略与规则集带缓存（`clash_cache_dir`），面板“后台刷新策略”会重新拉取并生效
 
 ## 面板入口
 
@@ -26,5 +27,5 @@ python3 app.py
 
 - `app.py` 主程序（DNS + Web）
 - `config.json` 默认配置，可手工编辑或通过面板修改（含上游 DNS）
-- `rules/` 建议放置 `blackmatrix7/ios_rule_script` 仓库（或其 `rule/Clash` 子目录的链接/拷贝）
+- `clash_cache_dir`（默认 `clash_cache/`）用于缓存远程策略/规则集
 - `token`：在 `config.json` 中设置，用于保护 Web 面板和所有接口。所有请求必须携带 `token`，可通过 URL 参数 `?token=xxx` 或请求头 `X-Token: xxx`。
