@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse, unquote
+from urllib.parse import parse_qs, urlparse, unquote, urlencode
 from typing import Optional, Tuple, List, Dict
 from string import Template
 from pathlib import Path
@@ -36,10 +36,15 @@ def is_valid_ip(ip: str) -> bool:
         return False
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+LOCAL_POLICY_FILENAME = "local_group.ini"
+LOCAL_POLICY_PATH = Path(__file__).parent / LOCAL_POLICY_FILENAME
+MAX_PROFILE_TEXT_BYTES = 1024 * 1024  # 1 MiB
+MAX_FETCH_BYTES = 2 * 1024 * 1024  # 2 MiB
+MAX_POST_BYTES = 2 * 1024 * 1024  # 2 MiB
 
 # Default configuration. Users can override ports and IP pools in config.json.
 DEFAULT_CONFIG = {
-    "listen_host": "0.0.0.0",
+    "listen_host": "127.0.0.1",
     "web_host": "0.0.0.0",
     "dns_port": 5353,
     "web_port": 8080,
@@ -47,6 +52,7 @@ DEFAULT_CONFIG = {
     # IP 池探测站点：netvigator / ifconfig
     "ip_info_site": "netvigator",
     # Clash 分流策略（支持订阅转换 ini 与标准 config.yaml）
+    "clash_profile_source": "local",  # local / remote
     "clash_profile_url": "https://raw.githubusercontent.com/cutethotw/ClashRule/refs/heads/main/Customization/Andy120527.ini",
     "clash_cache_dir": "clash_cache",
     # 仅对 type=select 的分组生效：group_name -> selected_member
@@ -61,6 +67,62 @@ DEFAULT_CONFIG = {
 
 IP_INFO_SITES = ("netvigator", "ifconfig")
 DEFAULT_URLTEST_URL = "http://www.gstatic.com/generate_204"
+DEFAULT_LOCAL_POLICY_TEXT = """[custom]
+; 本地 Clash 策略（ACL4SSR 风格）
+; 你可以在 Web 面板里点击“编辑本地配置”修改本文件。
+;
+; 最少需要一个 FINAL 规则作为兜底：
+ruleset=🐟 漏网之鱼,[]FINAL
+
+enable_rule_generator=true
+overwrite_original_rules=true
+"""
+
+
+def _ensure_local_policy_file() -> None:
+    try:
+        if LOCAL_POLICY_PATH.exists():
+            return
+        LOCAL_POLICY_PATH.write_text(DEFAULT_LOCAL_POLICY_TEXT, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _read_local_policy_text() -> str:
+    _ensure_local_policy_file()
+    try:
+        if LOCAL_POLICY_PATH.is_symlink():
+            raise ValueError("local policy file must not be a symlink")
+        if LOCAL_POLICY_PATH.exists() and LOCAL_POLICY_PATH.stat().st_size > MAX_PROFILE_TEXT_BYTES:
+            raise ValueError("local policy file too large")
+        return LOCAL_POLICY_PATH.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _write_local_policy_text(text: str) -> None:
+    if not isinstance(text, str):
+        text = str(text)
+    data = text.encode("utf-8", errors="ignore")
+    if len(data) > MAX_PROFILE_TEXT_BYTES:
+        raise ValueError("policy text too large")
+    if LOCAL_POLICY_PATH.exists() and LOCAL_POLICY_PATH.is_symlink():
+        raise ValueError("local policy file must not be a symlink")
+    tmp = LOCAL_POLICY_PATH.with_suffix(LOCAL_POLICY_PATH.suffix + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW  # best-effort: avoid symlink writes on supported platforms
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(str(tmp), str(LOCAL_POLICY_PATH))
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
 def _curl_resolve_target(host: str, port: int, ip: str) -> str:
@@ -256,6 +318,15 @@ def ensure_config():
         dirty = True
 
     # Normalize clash_profile_url if it contains accidental newlines
+    # Normalize clash_profile_source
+    src_raw = cfg.get("clash_profile_source", DEFAULT_CONFIG.get("clash_profile_source", "local"))
+    src_norm = str(src_raw or "").strip().lower()
+    if src_norm not in ("local", "remote"):
+        src_norm = DEFAULT_CONFIG.get("clash_profile_source", "local")
+    if cfg.get("clash_profile_source") != src_norm:
+        cfg["clash_profile_source"] = src_norm
+        dirty = True
+
     if isinstance(cfg.get("clash_profile_url"), str) and "\n" in cfg["clash_profile_url"]:
         first = cfg["clash_profile_url"].splitlines()[0].strip()
         cfg["clash_profile_url"] = first or DEFAULT_CONFIG["clash_profile_url"]
@@ -418,17 +489,111 @@ def _url_cache_path(cache_dir: str, url: str, suffix: str = ".txt") -> str:
     return os.path.join(cache_dir, host, *parts)
 
 
+_URL_SAFETY_CACHE = {}
+_URL_SAFETY_LOCK = threading.RLock()
+_URL_SAFETY_TTL_SEC = 600
+
+
+def _is_public_ip(ip_s: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip_s).is_global
+    except Exception:
+        return False
+
+
+def _validate_remote_url(url: str) -> str:
+    u = str(url or "").strip()
+    if not u:
+        raise ValueError("empty url")
+    if len(u) > 2048:
+        raise ValueError("url too long")
+    p = urlparse(u)
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("only http/https urls are allowed")
+    if p.username or p.password:
+        raise ValueError("userinfo in url is not allowed")
+    host = (p.hostname or "").strip().rstrip(".")
+    if not host:
+        raise ValueError("missing hostname")
+    if host.lower() in ("localhost",):
+        raise ValueError("localhost is not allowed")
+    port = p.port or (443 if scheme == "https" else 80)
+
+    # Fast path: IP literal.
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if not ip_obj.is_global:
+            raise ValueError("non-public ip is not allowed")
+        return u
+    except ValueError:
+        # not an IP literal
+        pass
+
+    # Cached DNS safety verdict.
+    key = (host.lower(), int(port))
+    now = time.time()
+    with _URL_SAFETY_LOCK:
+        cached = _URL_SAFETY_CACHE.get(key)
+        if isinstance(cached, dict) and now - float(cached.get("ts", 0)) < _URL_SAFETY_TTL_SEC:
+            if cached.get("ok"):
+                return u
+            raise ValueError(cached.get("reason") or "unsafe url")
+
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except Exception:
+        with _URL_SAFETY_LOCK:
+            _URL_SAFETY_CACHE[key] = {"ok": False, "ts": now, "reason": "dns resolve failed"}
+        raise ValueError("dns resolve failed")
+
+    ips = []
+    for _family, _socktype, _proto, _canon, sockaddr in infos:
+        try:
+            ip_s = sockaddr[0]
+        except Exception:
+            continue
+        if ip_s and ip_s not in ips:
+            ips.append(ip_s)
+
+    if not ips:
+        with _URL_SAFETY_LOCK:
+            _URL_SAFETY_CACHE[key] = {"ok": False, "ts": now, "reason": "dns resolve empty"}
+        raise ValueError("dns resolve empty")
+
+    for ip_s in ips:
+        if not _is_public_ip(ip_s):
+            with _URL_SAFETY_LOCK:
+                _URL_SAFETY_CACHE[key] = {"ok": False, "ts": now, "reason": f"non-public ip not allowed: {ip_s}"}
+            raise ValueError("non-public ip is not allowed")
+
+    with _URL_SAFETY_LOCK:
+        _URL_SAFETY_CACHE[key] = {"ok": True, "ts": now, "ips": ips}
+    return u
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_remote_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def fetch_text_cached(url: str, cache_dir: str, suffix: str = ".txt", timeout: int = 15, force: bool = False) -> str:
     """Fetch URL text with on-disk cache; on failure, fall back to cached copy."""
-    dest = _url_cache_path(cache_dir, url, suffix=suffix)
-    legacy_dest = os.path.join(cache_dir, f"{hashlib.sha1(url.encode('utf-8')).hexdigest()[:16]}{suffix}")
+    safe_url = _validate_remote_url(url)
+    dest = _url_cache_path(cache_dir, safe_url, suffix=suffix)
+    legacy_dest = os.path.join(cache_dir, f"{hashlib.sha1(safe_url.encode('utf-8')).hexdigest()[:16]}{suffix}")
     if not force and os.path.exists(dest):
         try:
+            if os.path.getsize(dest) > MAX_FETCH_BYTES:
+                raise ValueError("cached file too large")
             return Path(dest).read_text(encoding="utf-8", errors="ignore")
         except Exception:
             pass
     if not force and os.path.exists(legacy_dest):
         try:
+            if os.path.getsize(legacy_dest) > MAX_FETCH_BYTES:
+                raise ValueError("cached file too large")
             text = Path(legacy_dest).read_text(encoding="utf-8", errors="ignore")
             try:
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -445,8 +610,15 @@ def fetch_text_cached(url: str, cache_dir: str, suffix: str = ".txt", timeout: i
     tmp = dest + ".tmp"
     try:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            data = r.read()
+        opener = urllib.request.build_opener(_SafeRedirectHandler())
+        req = urllib.request.Request(safe_url, headers={"User-Agent": "DNSUnlock/1.0"})
+        with opener.open(req, timeout=timeout) as r:
+            final_url = r.geturl()
+            if final_url:
+                _validate_remote_url(final_url)
+            data = r.read(MAX_FETCH_BYTES + 1)
+        if len(data) > MAX_FETCH_BYTES:
+            raise ValueError("response too large")
         Path(tmp).write_bytes(data)
         os.replace(tmp, dest)
         if os.path.exists(legacy_dest):
@@ -478,6 +650,15 @@ def _detect_profile_kind(text: str, url: str = "") -> str:
         return "ini"
     if "proxy-groups:" in text or "rules:" in text:
         return "yaml"
+    # Default to INI (ACL4SSR-style) for empty/unknown inputs.
+    return "ini"
+
+
+def _json_for_html_script(obj) -> str:
+    """JSON safe to embed directly inside a <script> block."""
+    s = json.dumps(obj, ensure_ascii=False)
+    # Prevent `</script>` break-out and reduce XSS risk.
+    return s.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     u = (url or "").lower()
     if u.endswith((".yml", ".yaml")):
         return "yaml"
@@ -797,9 +978,18 @@ class ClashPolicy:
 def load_clash_policy(cfg: dict, force: bool = False) -> ClashPolicy:
     """Load policy from cfg['clash_profile_url'] (INI or YAML), including rule providers."""
     cache_dir = _cache_dir_from_cfg(cfg)
-    url = (cfg.get("clash_profile_url") or DEFAULT_CONFIG["clash_profile_url"]).strip()
-    profile_suffix = ".ini" if url.lower().endswith(".ini") else ".yaml"
-    text = fetch_text_cached(url, cache_dir, suffix=profile_suffix, force=force)
+    source = (cfg.get("clash_profile_source") or DEFAULT_CONFIG.get("clash_profile_source") or "local").strip().lower()
+    if source not in ("local", "remote"):
+        source = DEFAULT_CONFIG.get("clash_profile_source") or "local"
+
+    if source == "local":
+        _ensure_local_policy_file()
+        url = str(LOCAL_POLICY_PATH)
+        text = _read_local_policy_text()
+    else:
+        url = (cfg.get("clash_profile_url") or DEFAULT_CONFIG["clash_profile_url"]).strip()
+        profile_suffix = ".ini" if url.lower().endswith(".ini") else ".yaml"
+        text = fetch_text_cached(url, cache_dir, suffix=profile_suffix, force=force)
     kind = _detect_profile_kind(text, url=url)
     policy = ClashPolicy(kind=kind)
 
@@ -1016,6 +1206,17 @@ class ConfigManager:
             if self.config.get("clash_profile_url") == url:
                 return False
             self.config["clash_profile_url"] = url
+            self.save()
+        return True
+
+    def set_clash_profile_source(self, source: str) -> bool:
+        source = (source or "").strip().lower()
+        if source not in ("local", "remote"):
+            return False
+        with self.lock:
+            if self.config.get("clash_profile_source") == source:
+                return False
+            self.config["clash_profile_source"] = source
             self.save()
         return True
 
@@ -1413,6 +1614,21 @@ def parse_question(packet: bytes) -> Tuple[str, int, int, int]:
     return qname, qtype, qclass, end
 
 
+def patch_question_qtype(query: bytes, qend: int, new_qtype: int) -> bytes:
+    """Return a copy of a DNS query with its QTYPE replaced.
+
+    Assumes QDCOUNT=1 and that qend is the end offset of the first question.
+    """
+    if not query or qend < 4 or len(query) < qend:
+        return query
+    try:
+        b = bytearray(query)
+        b[qend - 4 : qend - 2] = int(new_qtype).to_bytes(2, "big")
+        return bytes(b)
+    except Exception:
+        return query
+
+
 def build_servfail(query: bytes) -> bytes:
     if len(query) < 12:
         return b""
@@ -1578,6 +1794,37 @@ def extract_a_records(resp: bytes) -> List[str]:
     return ips
 
 
+def extract_aaaa_records(resp: bytes) -> List[str]:
+    """Extract IPv6 AAAA record addresses from a DNS response."""
+    ips: List[str] = []
+    if len(resp) < 12:
+        return ips
+    try:
+        qdcount = int.from_bytes(resp[4:6], "big")
+        ancount = int.from_bytes(resp[6:8], "big")
+        pos = 12
+        for _ in range(qdcount):
+            _, pos = _read_name(resp, pos)
+            pos += 4  # QTYPE + QCLASS
+        for _ in range(ancount):
+            _, pos = _read_name(resp, pos)
+            if pos + 10 > len(resp):
+                break
+            rtype = int.from_bytes(resp[pos : pos + 2], "big")
+            rdlen = int.from_bytes(resp[pos + 8 : pos + 10], "big")
+            pos += 10
+            rdata = resp[pos : pos + rdlen]
+            if rtype == 28 and rdlen == 16:
+                try:
+                    ips.append(str(ipaddress.IPv6Address(rdata)))
+                except Exception:
+                    pass
+            pos += rdlen
+    except Exception:
+        return ips
+    return ips
+
+
 def match_ips_to_cidr(ips: List[str], cidr_rules) -> Optional[Tuple[str, str]]:
     """Return (cat, svc) if any IP hits a CIDR rule."""
     if not ips or not cidr_rules:
@@ -1621,8 +1868,23 @@ def process_query(data: bytes, client_addr, server_sock: socket.socket, cfg: Con
             except Exception:
                 response = build_servfail(data)
         elif qtype == 28:
-            # For AAAA: if selected proxy is IPv6 -> answer; if selected proxy is IPv4 -> empty (force v4)
+            # For AAAA:
+            # - if matched to a specific IPv6 -> answer
+            # - if matched to a specific IPv4 -> empty (force v4)
+            # - only DIRECT can freely ask upstream for AAAA
             decision = cfg.decide_route(qname, ips=None)
+            if decision is None:
+                # Need upstream A records to evaluate IP-based rules (e.g. GEOIP/IP-CIDR).
+                q_a = patch_question_qtype(data, qend, 1)
+                try:
+                    upstream_a = forward_query(upstream_dns, q_a, timeout_ms)
+                except Exception:
+                    upstream_a = build_servfail(q_a)
+                ips = extract_a_records(upstream_a)
+                decision = cfg.decide_route(qname, ips=ips)
+                if decision is None:
+                    decision = ("upstream", upstream_dns)
+
             if decision and decision[0] == "ip" and decision[1]:
                 try:
                     ip_obj = ipaddress.ip_address(decision[1])
@@ -1653,14 +1915,28 @@ def process_query(data: bytes, client_addr, server_sock: socket.socket, cfg: Con
                 if decision is None:
                     decision = ("upstream", upstream_dns)
                 if decision[0] == "ip" and decision[1]:
-                    response = build_a_response(data, decision[1], qend)
+                    try:
+                        ip_obj = ipaddress.ip_address(decision[1])
+                        if isinstance(ip_obj, ipaddress.IPv4Address):
+                            response = build_a_response(data, decision[1], qend)
+                        else:
+                            response = build_empty_response(data)
+                    except Exception:
+                        response = build_empty_response(data)
                 elif decision[0] == "reject":
                     response = build_empty_response(data)
                 else:
                     response = upstream_resp
             else:
                 if decision[0] == "ip" and decision[1]:
-                    response = build_a_response(data, decision[1], qend)
+                    try:
+                        ip_obj = ipaddress.ip_address(decision[1])
+                        if isinstance(ip_obj, ipaddress.IPv4Address):
+                            response = build_a_response(data, decision[1], qend)
+                        else:
+                            response = build_empty_response(data)
+                    except Exception:
+                        response = build_empty_response(data)
                 elif decision[0] == "reject":
                     response = build_empty_response(data)
                 else:
@@ -1712,6 +1988,9 @@ class WebHandler(BaseHTTPRequestHandler):
         if path.endswith("api/config"):
             body, _ = self.cfg.get_snapshot()
             return self._send(200, body, "application/json")
+        if path.endswith("api/local_policy"):
+            text = _read_local_policy_text()
+            return self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
         if path.endswith("api/ipinfo"):
             ip = qs.get("ip", [None])[0]
             force = "refresh" in qs
@@ -1747,7 +2026,10 @@ class WebHandler(BaseHTTPRequestHandler):
         if not self._check_token(qs):
             return
         length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length).decode("utf-8")
+        if length > MAX_POST_BYTES:
+            self._send(413, b"Payload Too Large", "text/plain; charset=utf-8")
+            return
+        raw = self.rfile.read(length).decode("utf-8", errors="ignore")
         data = parse_qs(raw)
 
         if path.endswith("save_upstreams"):
@@ -1760,10 +2042,23 @@ class WebHandler(BaseHTTPRequestHandler):
                 site = (data.get("ip_info_site", [""])[0] or "").strip()
                 self.cfg.set_ip_info_site(site)
 
-            # --- Clash 策略链接 ---
+            # --- Clash 策略来源/链接 ---
+            if "clash_profile_source" in data:
+                src = (data.get("clash_profile_source", [""])[0] or "").strip().lower()
+                if src not in ("local", "remote"):
+                    self._send(400, b"Bad Request: invalid clash_profile_source", "text/plain; charset=utf-8")
+                    return
+                self.cfg.set_clash_profile_source(src)
+
             if "clash_profile_url" in data:
                 url = (data.get("clash_profile_url", [""])[0] or "").strip()
-                self.cfg.set_clash_profile_url(url)
+                if url:
+                    try:
+                        _validate_remote_url(url)
+                    except Exception as e:
+                        self._send(400, f"Bad Request: {e}".encode("utf-8"), "text/plain; charset=utf-8")
+                        return
+                    self.cfg.set_clash_profile_url(url)
 
             # --- IP池与上游池 ---
             new_ip_pool = current_cfg.get("ip_pool", [])
@@ -1804,6 +2099,15 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.cfg.set_clash_group_selected(group, val)
 
             self.cfg.update_ip_pool(new_ip_pool, new_upstream_dns, new_upstream_pool)
+        elif path.endswith("save_local_policy"):
+            text = data.get("text", [""])[0]
+            try:
+                _write_local_policy_text(text)
+            except Exception as e:
+                self._send(400, f"Bad Request: {e}".encode("utf-8"), "text/plain; charset=utf-8")
+                return
+            # Apply immediately (no-op if current strategy is remote).
+            self.cfg.reload_rules_async(force=True)
         elif path.endswith("refresh_rules"):
             started = self.cfg.reload_rules_async(force=True)
             resp = {"started": started}
@@ -1821,6 +2125,7 @@ class WebHandler(BaseHTTPRequestHandler):
         # 首屏避免阻塞：仅使用缓存的 IP 元信息；浏览器会异步刷新
         ip_meta = self.cfg.peek_ip_meta()
         token = cfg.get("token", "")
+        clash_profile_source = cfg.get("clash_profile_source", DEFAULT_CONFIG.get("clash_profile_source", "local"))
         clash_profile_url = cfg.get("clash_profile_url", DEFAULT_CONFIG["clash_profile_url"])
         policy_kind = cfg.get("policy_kind") or "-"
         policy_rule_count = cfg.get("policy_rule_count", 0)
@@ -1847,7 +2152,9 @@ class WebHandler(BaseHTTPRequestHandler):
             web_host=cfg.get("web_host", "0.0.0.0"),
             web_port=cfg.get("web_port"),
             category_blocks=group_html,
+            clash_profile_source=html.escape(str(clash_profile_source), quote=True),
             clash_profile_url=html.escape(str(clash_profile_url), quote=True),
+            local_policy_filename=html.escape(str(LOCAL_POLICY_FILENAME), quote=True),
             policy_kind=html.escape(str(policy_kind)),
             policy_rule_count=str(int(policy_rule_count)),
             policy_group_count=str(int(policy_group_count)),
@@ -1855,10 +2162,10 @@ class WebHandler(BaseHTTPRequestHandler):
             loaded_at=loaded_at,
             upstream_dns=upstream_dns,
             loaded_at_ts=str(int(loaded_at_raw)),
-            ip_meta_json=json.dumps(ip_meta),
+            ip_meta_json=_json_for_html_script(ip_meta),
             ip_info_site=cfg.get("ip_info_site", DEFAULT_CONFIG.get("ip_info_site", "netvigator")),
             token=token,
-            token_query=f"token={token}",
+            token_query=urlencode({"token": token}),
         )
 
     def render_group_section(self, cfg: dict, ip_pool: list, upstream_dns: str, ip_meta: dict) -> str:

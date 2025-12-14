@@ -233,6 +233,12 @@
       width: auto;
       white-space: nowrap;
     }
+    button.ghost-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
     #ipinfo-site { width: auto; min-width: 0; }
     .ghost-btn.danger { border-color: #ffb3b3; color: #b20000; }
     .row { margin-bottom: 10px; }
@@ -248,15 +254,61 @@
       height:44px;
       line-height:22px;
     }
-.input-row .btn {
-  height:44px;
-  padding:0 16px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  flex-shrink:0;
-  margin-top:0;
-}
+    .input-row select.ghost-btn {
+      height:44px;
+      padding: 0 12px;
+      font-size: 14px;
+    }
+    .input-row button.ghost-btn {
+      height: 44px;
+      padding: 0 12px;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .input-row .btn {
+      height:44px;
+      padding:0 16px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      flex-shrink:0;
+      margin-top:0;
+      font-size: 14px;
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      padding: 18px;
+      background: rgba(0,0,0,0.35);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9998;
+    }
+    .modal.show { display: flex; }
+    .modal-card {
+      width: min(980px, 96vw);
+      max-height: 92vh;
+      overflow: auto;
+      padding: 16px 16px 14px;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .modal-actions .ghost-btn,
+    .modal-actions .btn {
+      height: 44px;
+      padding: 0 16px;
+      margin-top: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+    #local-policy-text { min-height: 52vh; }
     #toast {
       position: fixed;
       top: 16px;
@@ -308,22 +360,32 @@
           </div>
         </div>
 
-        <div class="chip-bar" style="margin-top:14px;">
-          <div class="chip-head">
-            <span style="color:var(--muted);font-size:13px;">Clash 策略（自动加载）</span>
-            <div class="chip-actions">
-              <button type="button" class="ghost-btn" id="refresh-rules-btn">后台刷新</button>
+	        <div class="chip-bar" style="margin-top:14px;">
+	          <div class="chip-head">
+	            <span style="color:var(--muted);font-size:13px;">Clash 策略（自动加载）</span>
+	            <div class="chip-actions">
+	              <button type="button" class="ghost-btn" id="refresh-rules-btn">后台刷新</button>
+	            </div>
+	          </div>
+	          <div class="input-row">
+              <select id="clash-profile-source" class="ghost-btn" title="选择策略来源">
+                <option value="local">本地（${local_policy_filename}）</option>
+                <option value="remote">网络链接</option>
+              </select>
+              <button type="button" class="ghost-btn" id="edit-local-policy">编辑本地配置</button>
+              <button class="btn" type="button" id="save-policy-settings">保存</button>
+	          </div>
+            <div id="remote-policy-box" style="margin-top:10px;">
+              <label>网络策略链接</label>
+              <div class="input-row">
+                <input id="clash-profile-url" placeholder="输入 Clash 策略链接（仅支持 http/https）" value="${clash_profile_url}" />
+              </div>
+              <p style="color:var(--muted);font-size:12px;margin:8px 0 0;">安全限制：拒绝 file:// / localhost / 内网地址；若策略包含规则集链接，也会同样校验。</p>
             </div>
-          </div>
-          <label>策略链接</label>
-          <div class="input-row">
-            <input id="clash-profile-url" placeholder="输入 Clash 策略链接" value="${clash_profile_url}" />
-            <button class="btn" type="button" id="save-profile-url">保存</button>
-          </div>
-          <p style="color:var(--muted);">类型: <code>${policy_kind}</code> · 分组: ${policy_group_count} · 规则集: ${policy_provider_count} · 规则: ${policy_rule_count}</p>
-          <p style="color:var(--muted);">最近刷新: ${loaded_at}</p>
-          <p style="margin-top:8px;color:var(--muted);font-size:12px;">说明：本项目仅做 DNS 解析覆写，使用 Clash 分流组/规则来决定“解析到哪个 IP”或“上游DNS”。</p>
-        </div>
+	          <p style="color:var(--muted);">类型: <code>${policy_kind}</code> · 分组: ${policy_group_count} · 规则集: ${policy_provider_count} · 规则: ${policy_rule_count}</p>
+	          <p style="color:var(--muted);">最近刷新: ${loaded_at}</p>
+	          <p style="margin-top:8px;color:var(--muted);font-size:12px;">说明：本项目仅做 DNS 解析覆写，使用 Clash 分流组/规则来决定“解析到哪个 IP”或“上游DNS”。</p>
+	        </div>
 
         <div class="chip-bar" style="margin-top:14px;">
           <div class="chip-head">
@@ -349,8 +411,21 @@
 	      </div>
 	    </form>
 	  </main>
-  <div class="footer">DNSUnlock · Clash 分流 · DNS 解析覆写</div>
-  <script>
+	  <div class="footer">DNSUnlock · Clash 分流 · DNS 解析覆写</div>
+    <div class="modal" id="local-policy-modal" aria-hidden="true">
+      <section class="card modal-card">
+        <div class="row-head" style="margin-bottom:10px;">
+          <span style="font-weight:600;">编辑本地策略（${local_policy_filename}）</span>
+          <button type="button" class="ghost-btn" id="local-policy-close">关闭</button>
+        </div>
+        <textarea id="local-policy-text" spellcheck="false" placeholder="在此编辑本地策略内容"></textarea>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="local-policy-cancel">取消</button>
+          <button type="button" class="btn" id="local-policy-save">保存并刷新</button>
+        </div>
+      </section>
+    </div>
+	  <script>
     // Toast
     const toast = document.createElement('div');
     toast.id = 'toast';
@@ -458,19 +533,28 @@
     const form = document.querySelector('form[action="save_upstreams?${token_query}"]');
     form.addEventListener('submit', e => e.preventDefault());
 
-    async function postParams(params) {
+    async function postForm(url, params) {
       try {
-        await fetch('./save_upstreams?${token_query}', {
+        const res = await fetch(url, {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
           body: params.toString(),
         });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => '');
+          showToast(msg ? msg.slice(0, 120) : '更新失败');
+          return false;
+        }
         showToast('已更新');
         return true;
       } catch (e) {
         showToast('更新失败');
         return false;
       }
+    }
+
+    async function postParams(params) {
+      return postForm('./save_upstreams?${token_query}', params);
     }
 
     const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
@@ -533,14 +617,91 @@
       pollRules(initialRulesTs || 0);
     });
 
-    // 保存策略链接后自动触发刷新
-    document.getElementById('save-profile-url')?.addEventListener('click', async () => {
-      const input = document.getElementById('clash-profile-url');
-      const url = (input?.value || '').trim();
-      if (!url) { showToast('请输入策略链接'); return; }
+    // ---- Clash 策略来源（本地 / 网络） ----
+    const policySourceSel = document.getElementById('clash-profile-source');
+    const remotePolicyBox = document.getElementById('remote-policy-box');
+    const editLocalPolicyBtn = document.getElementById('edit-local-policy');
+    const savePolicyBtn = document.getElementById('save-policy-settings');
+
+    function normalizePolicySource(v) {
+      return String(v || '').trim().toLowerCase() === 'remote' ? 'remote' : 'local';
+    }
+
+    if (policySourceSel) {
+      policySourceSel.value = normalizePolicySource('${clash_profile_source}');
+    }
+
+    function syncPolicyUi() {
+      const src = normalizePolicySource(policySourceSel?.value);
+      if (remotePolicyBox) remotePolicyBox.style.display = (src === 'remote') ? 'block' : 'none';
+      if (editLocalPolicyBtn) editLocalPolicyBtn.style.display = (src === 'local') ? 'inline-flex' : 'none';
+    }
+    policySourceSel?.addEventListener('change', syncPolicyUi);
+    syncPolicyUi();
+
+    // 保存策略设置后自动触发刷新
+    savePolicyBtn?.addEventListener('click', async () => {
+      const src = normalizePolicySource(policySourceSel?.value);
       const p = new URLSearchParams();
-      p.set('clash_profile_url', url);
-      await postParams(p);
+      p.set('clash_profile_source', src);
+      if (src === 'remote') {
+        const input = document.getElementById('clash-profile-url');
+        const url = (input?.value || '').trim();
+        if (!url) { showToast('请输入策略链接'); return; }
+        p.set('clash_profile_url', url);
+      }
+      const ok = await postParams(p);
+      if (!ok) return;
+      showToast('后台刷新策略中...');
+      try { await fetch('./refresh_rules?${token_query}', {method: 'POST'}); } catch (_) {}
+      pollRules(initialRulesTs || 0);
+    });
+
+    // ---- 本地策略编辑弹框 ----
+    const localModal = document.getElementById('local-policy-modal');
+    const localText = document.getElementById('local-policy-text');
+    function openLocalModal() {
+      localModal?.classList.add('show');
+      localModal?.setAttribute('aria-hidden', 'false');
+    }
+    function closeLocalModal() {
+      localModal?.classList.remove('show');
+      localModal?.setAttribute('aria-hidden', 'true');
+    }
+    document.getElementById('local-policy-close')?.addEventListener('click', closeLocalModal);
+    document.getElementById('local-policy-cancel')?.addEventListener('click', closeLocalModal);
+    localModal?.addEventListener('click', (e) => { if (e.target === localModal) closeLocalModal(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && localModal?.classList.contains('show')) closeLocalModal();
+    });
+
+    editLocalPolicyBtn?.addEventListener('click', async () => {
+      if (normalizePolicySource(policySourceSel?.value) !== 'local') return;
+      openLocalModal();
+      if (localText) {
+        localText.disabled = true;
+        localText.value = '加载中...';
+      }
+      try {
+        const res = await fetch('./api/local_policy?${token_query}');
+        const text = await res.text();
+        if (localText) localText.value = text || '';
+      } catch (_) {
+        if (localText) localText.value = '';
+        showToast('读取本地策略失败');
+      } finally {
+        if (localText) localText.disabled = false;
+        localText?.focus();
+      }
+    });
+
+    document.getElementById('local-policy-save')?.addEventListener('click', async () => {
+      const p = new URLSearchParams();
+      p.set('text', localText?.value || '');
+      const ok = await postForm('./save_local_policy?${token_query}', p);
+      if (!ok) return;
+      closeLocalModal();
+      showToast('后台刷新策略中...');
       try { await fetch('./refresh_rules?${token_query}', {method: 'POST'}); } catch (_) {}
       pollRules(initialRulesTs || 0);
     });
