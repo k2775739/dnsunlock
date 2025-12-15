@@ -221,7 +221,26 @@ def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, in
 
     This approximates Clash url-test delay: connect+request total time (ms).
     """
+    # Rate limit: at most once per minute for the same (ip, url).
+    key_url = (url or "").strip() or DEFAULT_URLTEST_URL
+    key = (str(ip or "").strip(), key_url)
+    now = time.monotonic()
+    try:
+        cache = probe_url_latency._cache  # type: ignore[attr-defined]
+        lock = probe_url_latency._lock    # type: ignore[attr-defined]
+    except Exception:
+        cache = {}
+        lock = threading.RLock()
+        probe_url_latency._cache = cache  # type: ignore[attr-defined]
+        probe_url_latency._lock = lock    # type: ignore[attr-defined]
+    with lock:
+        rec = cache.get(key)
+        if isinstance(rec, dict) and now - float(rec.get("ts", 0)) < 60.0:
+            return bool(rec.get("ok")), int(rec.get("ms") or 0)
+
     if not is_valid_ip(ip):
+        with lock:
+            cache[key] = {"ok": False, "ms": 0, "ts": now}
         return False, 0
     effective_url = (url or "").strip()
     u = urlparse(effective_url)
@@ -231,6 +250,8 @@ def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, in
         u = urlparse(effective_url)
         host = u.hostname
     if not host:
+        with lock:
+            cache[key] = {"ok": False, "ms": 0, "ts": now}
         return False, 0
     scheme = (u.scheme or "http").lower()
     port = u.port or (443 if scheme == "https" else 80)
@@ -260,9 +281,13 @@ def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, in
         except Exception:
             code = 0
         ok = 200 <= code < 400
+        with lock:
+            cache[key] = {"ok": bool(ok), "ms": int(ms), "ts": now}
         return ok, ms
     except Exception:
         ms = int((time.monotonic() - start) * 1000)
+        with lock:
+            cache[key] = {"ok": False, "ms": int(ms), "ts": now}
         return False, ms
 
 
@@ -1160,11 +1185,7 @@ class ConfigManager:
             self.rules_loaded_at = policy.loaded_at
             # policy changed -> invalidate url-test cache
             self.urltest_cache = {}
-        # Warm up IP meta cache for regex/url-test group matching
-        try:
-            self.get_ip_meta(force=True)
-        except Exception:
-            pass
+        # NOTE: Do not probe/fetch IP meta here to avoid blocking and unintended network access.
 
     def reload_rules_async(self, force: bool = False):
         with self.lock:
@@ -1298,7 +1319,7 @@ class ConfigManager:
             self.urltest_cache[key] = {"selected": best or "DIRECT", "tested_at": now, "results": results}
         return best or "DIRECT"
 
-    def _resolve_member(self, name: str, proxies: dict, seen: set) -> str:
+    def _resolve_member(self, name: str, proxies: dict, seen: set, allow_probe: bool = False) -> str:
         if not name:
             return "DIRECT"
         upper = name.upper()
@@ -1330,11 +1351,11 @@ class ConfigManager:
                 if is_valid_ip(chosen):
                     return chosen
                 if chosen in (pol.groups or {}):
-                    return self._resolve_member(chosen, proxies, seen)
+                    return self._resolve_member(chosen, proxies, seen, allow_probe=allow_probe)
             members = materialize_group_members(group, proxies)
             chosen_fallback = members[0] if members else "DIRECT"
-            return self._resolve_member(chosen_fallback, proxies, seen)
-        # url-test/fallback/load-balance -> auto pick by probing
+            return self._resolve_member(chosen_fallback, proxies, seen, allow_probe=allow_probe)
+        # url-test/fallback/load-balance -> auto pick (may probe if allowed)
         # Allow manual override for non-select groups as well.
         chosen = sel.get(name) if isinstance(sel, dict) else None
         chosen = str(chosen or "").strip()
@@ -1347,11 +1368,23 @@ class ConfigManager:
             if is_valid_ip(chosen):
                 return chosen
             if chosen in (pol.groups or {}):
-                return self._resolve_member(chosen, proxies, seen)
+                return self._resolve_member(chosen, proxies, seen, allow_probe=allow_probe)
         members = materialize_group_members(group, proxies)
         candidates = [m for m in members if m in proxies]
-        picked = self._urltest_pick(name, group, candidates) if candidates else "DIRECT"
-        return self._resolve_member(picked, proxies, seen)
+        if not candidates:
+            picked = "DIRECT"
+        elif allow_probe:
+            picked = self._urltest_pick(name, group, candidates)
+        else:
+            test_url = (group.get("url") or DEFAULT_URLTEST_URL) if isinstance(group, dict) else DEFAULT_URLTEST_URL
+            test_url = str(test_url or DEFAULT_URLTEST_URL).strip() or DEFAULT_URLTEST_URL
+            key = (name, test_url, tuple(candidates))
+            with self.lock:
+                cached = self.urltest_cache.get(key) if isinstance(self.urltest_cache, dict) else None
+            picked = cached.get("selected") if isinstance(cached, dict) else None
+            if not picked:
+                picked = candidates[0]
+        return self._resolve_member(str(picked or "DIRECT"), proxies, seen, allow_probe=allow_probe)
 
     def resolve_chain(self, name: str, proxies: dict, max_depth: int = 12, allow_probe: bool = False) -> List[str]:
         """Resolve a member into its final leaf and return the resolution chain.
@@ -1520,10 +1553,10 @@ class ConfigManager:
             return ("upstream", upstream_dns)
         if isinstance(target, str) and is_valid_ip(target):
             return ("ip", target)
-        # Build proxies (uses cached ip meta; may trigger fetch if empty/stale)
-        ip_meta = self.get_ip_meta(force=False)
+        # Build proxies using cached IP meta only (DNS path must not trigger probing/fetching).
+        ip_meta = self.peek_ip_meta()
         proxies = build_proxy_catalog(ip_pool, ip_meta)
-        final = self._resolve_member(str(target), proxies, seen=set())
+        final = self._resolve_member(str(target), proxies, seen=set(), allow_probe=False)
         if final == "REJECT":
             return ("reject", None)
         if final == "DIRECT":
@@ -1536,21 +1569,27 @@ class ConfigManager:
         return ("upstream", upstream_dns)
 
     def get_ip_meta(self, force=False):
-        """Return IP meta info dict ip->meta; refresh if cache stale or force."""
+        """Return IP meta info dict ip->meta.
+
+        fetch_ip_meta is only triggered when:
+          - force=True (user clicked "refresh probe"), or
+          - the IP is missing in cache (first dashboard open / new IP added).
+        """
         with self.lock:
             pool = list(self.config.get("ip_pool", []))
             site = (self.config.get("ip_info_site") or DEFAULT_CONFIG.get("ip_info_site") or "netvigator").strip().lower()
-            age = time.time() - self.ip_meta_fetched_at
-            cached = self.ip_meta_cache if (not force and age < 600 and self.ip_meta_site_cached == site) else {}
-        if cached and set(cached.keys()) == set(pool):
-            return cached
+            cached = dict(self.ip_meta_cache) if (not force and self.ip_meta_site_cached == site) else {}
         meta = {}
         for ip in pool:
-            info = fetch_ip_meta(ip, site=site)
-            if not isinstance(info, dict):
-                info = {}
+            if not force and ip in cached and isinstance(cached.get(ip), dict):
+                info = dict(cached[ip])
+            else:
+                info = fetch_ip_meta(ip, site=site)
+                if not isinstance(info, dict):
+                    info = {}
             lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0)
-            info["meta_ok"] = bool(info.get("ok"))
+            if "meta_ok" not in info:
+                info["meta_ok"] = bool(info.get("ok"))
             info["ok"] = bool(lat_ok)
             info["ms"] = int(lat_ms)
             meta[ip] = info
@@ -1566,18 +1605,25 @@ class ConfigManager:
             return dict(self.ip_meta_cache)
 
     def get_ip_meta_one(self, ip: str, force=False):
-        """Return meta for single ip, caching with 10min TTL unless force."""
+        """Return meta for a single IP.
+
+        fetch_ip_meta is only triggered when:
+          - force=True (user clicked "refresh probe"), or
+          - this IP is missing in cache (first dashboard open / new IP added).
+        """
         now = time.time()
         with self.lock:
             site = (self.config.get("ip_info_site") or DEFAULT_CONFIG.get("ip_info_site") or "netvigator").strip().lower()
-            age = now - self.ip_meta_fetched_at
-            if not force and age < 600 and self.ip_meta_site_cached == site and ip in self.ip_meta_cache:
-                return self.ip_meta_cache[ip]
-        meta = fetch_ip_meta(ip, site=site)
-        if not isinstance(meta, dict):
-            meta = {}
+            cached = self.ip_meta_cache.get(ip) if (not force and self.ip_meta_site_cached == site) else None
+        if not force and isinstance(cached, dict):
+            meta = dict(cached)
+        else:
+            meta = fetch_ip_meta(ip, site=site)
+            if not isinstance(meta, dict):
+                meta = {}
         lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0)
-        meta["meta_ok"] = bool(meta.get("ok"))
+        if "meta_ok" not in meta:
+            meta["meta_ok"] = bool(meta.get("ok"))
         meta["ok"] = bool(lat_ok)
         meta["ms"] = int(lat_ms)
         with self.lock:
