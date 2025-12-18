@@ -33,9 +33,32 @@ python3 -m pip install -r requirements.txt
 python3 app.py
 ```
 
-- 默认会读取同目录下的 `config.json`；若不存在则自动生成（`listen_host=127.0.0.1`、`dns_port=5353`、`web_port=8080` 等）
+- 默认会读取同目录下的 `config.json`（仓库默认配置 `web_port=22004`）；若不存在则自动生成默认配置（`listen_host=127.0.0.1`、`dns_port=5353`、`web_port=8080` 等）
 - 如需监听 `53` 端口，通常需要 root 权限运行，并在 `config.json` 中设置 `dns_port: 53`
-- 面板入口：`http://127.0.0.1:<web_port>/?token=<你的token>`
+- 面板入口（默认 `web_port=22004`）：`http://127.0.0.1:22004/?token=<你的token>`
+
+## Nginx 反代（可选）
+
+将以下配置放到你的 `server {}` 中：
+
+```nginx
+# --- 核心反代配置 ---
+    location /dns/ {
+        # 转发到本地 22004 端口
+        proxy_pass http://127.0.0.1:22004;
+
+        # 必要的反代 Header
+        proxy_redirect off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # WebSocket 支持 (如果后端应用需要长连接，如 V2Ray/Xray 等，必须加上这几行)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+```
 
 ## 配置说明（config.json）
 

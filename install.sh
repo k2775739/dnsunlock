@@ -138,53 +138,49 @@ setup_venv() {
   "$vpy" -m pip install -r "$INSTALL_DIR/requirements.txt" >/dev/null
 }
 
-generate_token() {
-  python3 - <<'PY'
-import secrets, string
-alphabet = string.ascii_letters + string.digits
-print("".join(secrets.choice(alphabet) for _ in range(24)))
+read_config_value() {
+  local key="$1"
+  python3 - "$INSTALL_DIR/config.json" "$key" <<'PY'
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(1)
+v = cfg.get(key)
+if v is None:
+    sys.exit(1)
+if isinstance(v, (dict, list)):
+    print(json.dumps(v))
+else:
+    print(v)
 PY
 }
 
-write_config() {
-  local dns_port="$1"
-  local token="$2"
-
-  local cfg_path="$INSTALL_DIR/config.json"
-  if [[ -e "$cfg_path" ]]; then
-    local bak
-    bak="$(backup_path "$cfg_path")"
-    log "检测到已存在配置：$cfg_path"
-    log "自动备份到：$bak"
-    mv "$cfg_path" "$bak"
+ensure_default_config() {
+  if [[ ! -f "$INSTALL_DIR/config.json" ]]; then
+    die "未找到默认配置文件：$INSTALL_DIR/config.json（本脚本不会自动新建配置，请先在仓库中准备好 config.json）"
   fi
-
-  cat >"$cfg_path" <<EOF
-{
-  "listen_host": "127.0.0.1",
-  "web_host": "0.0.0.0",
-  "dns_port": ${dns_port},
-  "web_port": 8080,
-  "timeout_ms": 2000,
-  "ip_info_site": "netvigator",
-  "clash_profile_source": "local",
-  "clash_profile_url": "https://raw.githubusercontent.com/cutethotw/ClashRule/refs/heads/main/Customization/Andy120527.ini",
-  "clash_cache_dir": "clash_cache",
-  "clash_group_selection": {},
-  "geoip_cn_url": "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt",
-  "token": "${token}",
-  "upstream_dns": "8.8.8.8",
-  "upstream_dns_pool": [
-    "1.1.1.1",
-    "8.8.8.8"
-  ],
-  "ip_pool": [
-    "1.1.1.1",
-    "8.8.8.8",
-    "9.9.9.9"
-  ]
 }
-EOF
+
+set_config_int() {
+  local key="$1"
+  local value="$2"
+  python3 - "$INSTALL_DIR/config.json" "$key" "$value" <<'PY'
+import json, sys
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    value_i = int(value)
+except Exception:
+    sys.exit(2)
+with open(path, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+if cfg.get(key) != value_i:
+    cfg[key] = value_i
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+PY
 }
 
 install_systemd_unit() {
@@ -287,18 +283,14 @@ main() {
     fi
   fi
 
-  local dns_port="5353"
-  if [[ "$set_system_dns" == "y" ]]; then
-    dns_port="53"
-  fi
-
   fetch_repo
   ensure_user
   setup_venv
+  ensure_default_config
 
-  local token
-  token="$(generate_token)"
-  write_config "$dns_port" "$token"
+  if [[ "$set_system_dns" == "y" ]]; then
+    set_config_int "dns_port" "53" || die "更新 config.json 的 dns_port 失败。"
+  fi
 
   chown -R dnsunlock:dnsunlock "$INSTALL_DIR"
 
@@ -316,9 +308,20 @@ main() {
     setup_resolv_conf_lock
   fi
 
+  local web_port=""
+  web_port="$(read_config_value "web_port" 2>/dev/null || true)"
+  local token=""
+  token="$(read_config_value "token" 2>/dev/null || true)"
+
   log "安装完成"
   log "配置文件：$INSTALL_DIR/config.json"
-  log "面板地址：http://127.0.0.1:8080/?token=${token}"
+  if [[ -n "$web_port" && -n "$token" ]]; then
+    log "面板地址：http://127.0.0.1:${web_port}/?token=${token}"
+  elif [[ -n "$web_port" ]]; then
+    log "面板地址：http://127.0.0.1:${web_port}/"
+  else
+    log "面板地址：请查看 config.json 的 web_port 与 token"
+  fi
   log "服务管理：systemctl status|restart|stop|disable $SERVICE_NAME"
 }
 
