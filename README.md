@@ -4,6 +4,23 @@
 
 ## 安装
 
+### 一键安装（Linux / systemd）
+
+> 一条命令从 GitHub 拉取并运行安装脚本（脚本在项目根目录 `install.sh`）。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/k2775739/dnsunlock/main/install.sh | sudo bash
+```
+
+脚本会交互式询问：
+
+- 是否配置 systemd 开机自启
+- 是否将系统 DNS 设置为 `127.0.0.1`（仅此一项，无备用 DNS），并锁定 `/etc/resolv.conf` 以避免重启后被覆盖
+
+> 注意：锁定 `/etc/resolv.conf` 可能会影响 NetworkManager / systemd-resolved 等对 DNS 的自动管理；脚本会自动备份并在输出中给出恢复方法。
+
+### 手动安装
+
 ```bash
 python3 -m pip install -r requirements.txt
 ```
