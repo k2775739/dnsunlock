@@ -35,6 +35,12 @@ def is_valid_ip(ip: str) -> bool:
     except Exception:
         return False
 
+def ip_version(ip: str) -> Optional[int]:
+    try:
+        return ipaddress.ip_address(ip).version
+    except Exception:
+        return None
+
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 LOCAL_POLICY_FILENAME = "local_group.ini"
 LOCAL_POLICY_PATH = Path(__file__).parent / LOCAL_POLICY_FILENAME
@@ -664,8 +670,15 @@ def fetch_text_cached(url: str, cache_dir: str, suffix: str = ".txt", timeout: i
 
 
 def _detect_profile_kind(text: str, url: str = "") -> str:
+    t = text or ""
+    if re.search(r"^\s*\[rule\]\s*$", t, flags=re.IGNORECASE | re.MULTILINE):
+        return "shadowrocket"
+    if re.search(r"^\s*\[proxy\s+group\]\s*$", t, flags=re.IGNORECASE | re.MULTILINE):
+        return "shadowrocket"
+    if "proxy-groups:" in t or "rules:" in t:
+        return "yaml"
     head = ""
-    for ln in text.splitlines():
+    for ln in t.splitlines():
         s = ln.strip()
         if not s or s.startswith(("#", ";")):
             continue
@@ -673,8 +686,9 @@ def _detect_profile_kind(text: str, url: str = "") -> str:
         break
     if head.startswith("[") and "]" in head:
         return "ini"
-    if "proxy-groups:" in text or "rules:" in text:
-        return "yaml"
+    u = (url or "").lower()
+    if u.endswith(".conf"):
+        return "shadowrocket"
     # Default to INI (ACL4SSR-style) for empty/unknown inputs.
     return "ini"
 
@@ -861,6 +875,114 @@ def parse_acl4ssr_ini(text: str):
     return rules, groups
 
 
+def parse_shadowrocket_conf(text: str):
+    rules = []
+    groups = {}
+    section = ""
+    default_sep = re.compile(r"\s*=\s*")
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+    for raw in t.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+
+        if section in ("proxy group", "proxy-group", "proxygroup"):
+            if "=" not in line:
+                continue
+            name, rest = default_sep.split(line, maxsplit=1)
+            name = name.strip()
+            rest = rest.strip()
+            if not name or not rest:
+                continue
+            parts = [p.strip() for p in rest.split(",") if p.strip()]
+            if not parts:
+                continue
+            gtype = parts[0].strip().lower()
+            items = []
+            url = None
+            interval = None
+            default_name = None
+            for p in parts[1:]:
+                if "=" in p:
+                    k, v = p.split("=", 1)
+                    k = k.strip().lower()
+                    v = v.strip()
+                    if k in ("url", "test-url"):
+                        if v:
+                            url = v
+                        continue
+                    if k == "interval":
+                        m = re.match(r"^(\d+)", v)
+                        if m:
+                            interval = int(m.group(1))
+                        continue
+                    if k in ("policy-regex-filter", "regex"):
+                        if v:
+                            items.append({"kind": "regex", "value": v})
+                        continue
+                    if k in ("policy-select-name", "default"):
+                        if v:
+                            default_name = v
+                        continue
+                    continue
+                token = p.strip()
+                if not token:
+                    continue
+                items.append({"kind": "option", "value": token})
+            items = _normalize_group_items(items)
+            if not default_name or str(default_name).strip().upper() == "PROXY":
+                default_name = "DIRECT"
+            if default_name:
+                idx = None
+                for i, item in enumerate(items):
+                    if item.get("kind") == "option" and str(item.get("value")) == default_name:
+                        idx = i
+                        break
+                if idx is not None:
+                    item = items.pop(idx)
+                    items.insert(0, item)
+                else:
+                    items.insert(0, {"kind": "option", "value": default_name})
+            groups[name] = {"name": name, "type": gtype, "items": items, "url": url, "interval": interval}
+            continue
+
+        if section == "rule":
+            parts = [p.strip() for p in line.split(",") if p.strip()]
+            if not parts:
+                continue
+            kind = parts[0].upper()
+            if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
+                if len(parts) >= 3:
+                    rules.append({"kind": kind, "value": parts[1].lower(), "target": parts[2]})
+                continue
+            if kind in ("IP-CIDR", "IP-CIDR6"):
+                if len(parts) >= 3:
+                    try:
+                        net = ipaddress.ip_network(parts[1], strict=False)
+                    except Exception:
+                        continue
+                    no_resolve = any(p.lower() == "no-resolve" for p in parts[3:])
+                    rules.append({"kind": kind, "value": parts[1], "net": net, "target": parts[2], "no_resolve": no_resolve})
+                continue
+            if kind in ("GEOIP",):
+                if len(parts) >= 3:
+                    rules.append({"kind": "GEOIP", "value": parts[1].upper(), "target": parts[2]})
+                continue
+            if kind in ("RULE-SET", "DOMAIN-SET"):
+                if len(parts) >= 3:
+                    rules.append({"kind": "RULE-SET", "value": parts[1], "target": parts[2]})
+                continue
+            if kind in ("FINAL", "MATCH"):
+                if len(parts) >= 2:
+                    rules.append({"kind": "MATCH", "target": parts[1]})
+                continue
+    return rules, groups
+
+
 def parse_clash_yaml_config(text: str):
     """Parse standard Clash/Mihomo config.yaml (subset we need)."""
     obj = yaml.safe_load(text or "") or {}
@@ -936,6 +1058,35 @@ def _normalize_group_type(t: str) -> str:
     if t in ("select", "url-test", "fallback", "load-balance"):
         return t
     return "select"
+
+def _normalize_group_items(items: list) -> list:
+    """Remove PROXY, ensure DIRECT exists and stays at first position."""
+    if not isinstance(items, list):
+        return []
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") != "option":
+            out.append(item)
+            continue
+        val = str(item.get("value") or "").strip()
+        if not val:
+            continue
+        if val.upper() == "PROXY":
+            continue
+        out.append({"kind": "option", "value": val})
+    # ensure DIRECT exists and move to front
+    idx = None
+    for i, item in enumerate(out):
+        if item.get("kind") == "option" and str(item.get("value") or "").strip().upper() == "DIRECT":
+            idx = i
+            break
+    if idx is None:
+        out.insert(0, {"kind": "option", "value": "DIRECT"})
+    elif idx != 0:
+        out.insert(0, out.pop(idx))
+    return out
 
 
 def build_proxy_catalog(ip_pool: list, ip_meta: dict) -> dict:
@@ -1013,7 +1164,14 @@ def load_clash_policy(cfg: dict, force: bool = False) -> ClashPolicy:
         text = _read_local_policy_text()
     else:
         url = (cfg.get("clash_profile_url") or DEFAULT_CONFIG["clash_profile_url"]).strip()
-        profile_suffix = ".ini" if url.lower().endswith(".ini") else ".yaml"
+        if url.lower().endswith(".ini"):
+            profile_suffix = ".ini"
+        elif url.lower().endswith((".yml", ".yaml")):
+            profile_suffix = ".yaml"
+        elif url.lower().endswith(".conf"):
+            profile_suffix = ".conf"
+        else:
+            profile_suffix = ".txt"
         text = fetch_text_cached(url, cache_dir, suffix=profile_suffix, force=force)
     kind = _detect_profile_kind(text, url=url)
     policy = ClashPolicy(kind=kind)
@@ -1022,6 +1180,8 @@ def load_clash_policy(cfg: dict, force: bool = False) -> ClashPolicy:
         ini_rules, ini_groups = parse_acl4ssr_ini(text)
         for gname, g in ini_groups.items():
             g["type"] = _normalize_group_type(g.get("type"))
+            if g["type"] == "select":
+                g["items"] = _normalize_group_items(g.get("items") or [])
             policy.groups[gname] = g
 
         for r in ini_rules:
@@ -1048,10 +1208,64 @@ def load_clash_policy(cfg: dict, force: bool = False) -> ClashPolicy:
                 policy.rule_count += 1
         return policy
 
+    if kind == "shadowrocket":
+        s_rules, s_groups = parse_shadowrocket_conf(text)
+        for gname, g in s_groups.items():
+            g["type"] = _normalize_group_type(g.get("type"))
+            if g["type"] == "select":
+                g["items"] = _normalize_group_items(g.get("items") or [])
+            policy.groups[gname] = g
+        policy.rules = s_rules or []
+        policy.rule_count = len(policy.rules)
+
+        # Case-insensitive mapping for Shadowrocket group names in rule targets/options.
+        group_lower_map = {str(k).lower(): k for k in policy.groups.keys()}
+        for r in policy.rules:
+            target = r.get("target")
+            if isinstance(target, str):
+                mapped = group_lower_map.get(target.lower())
+                if mapped:
+                    r["target"] = mapped
+
+        for g in policy.groups.values():
+            items = g.get("items") or []
+            for item in items:
+                if item.get("kind") != "option":
+                    continue
+                val = str(item.get("value") or "")
+                if not val or val.upper() in ("DIRECT", "REJECT"):
+                    continue
+                mapped = group_lower_map.get(val.lower())
+                if mapped:
+                    item["value"] = mapped
+
+        for r in policy.rules:
+            if r.get("kind") != "RULE-SET":
+                continue
+            provider_key = (r.get("value") or "").strip()
+            if not provider_key or provider_key in policy.providers:
+                continue
+            if provider_key.lower().startswith(("http://", "https://")):
+                policy.providers[provider_key] = load_rule_provider(provider_key, cache_dir, force=force)
+                continue
+            # Local file path (relative to app.py if not absolute)
+            try:
+                p = Path(provider_key)
+                if not p.is_absolute():
+                    p = Path(__file__).parent / p
+                if p.exists():
+                    content = p.read_text(encoding="utf-8", errors="ignore")
+                    policy.providers[provider_key] = RuleProvider(name=provider_key, url=str(p), text=content)
+            except Exception:
+                continue
+        return policy
+
     # YAML config
     y_rules, y_groups, providers_def = parse_clash_yaml_config(text)
     for gname, g in (y_groups or {}).items():
         g["type"] = _normalize_group_type(g.get("type"))
+        if g["type"] == "select":
+            g["items"] = _normalize_group_items(g.get("items") or [])
         policy.groups[gname] = g
     policy.rules = y_rules or []
     policy.rule_count = len(policy.rules)
@@ -1264,6 +1478,61 @@ class ConfigManager:
             self.config["clash_group_selection"] = sel
             self.save()
         return True
+
+    def is_ipv6_node(self, selected_ip: str) -> bool:
+        """Return True if the selected node should be treated as IPv6."""
+        with self.lock:
+            meta = self.ip_meta_cache.get(selected_ip)
+        if isinstance(meta, dict):
+            real_ip = meta.get("real_ip")
+            if ip_version(real_ip) == 6:
+                return True
+        return False
+
+    def pick_region_fallback_ipv4(self, selected_ip: str) -> Optional[str]:
+        """Pick a same-region IPv4 candidate for an IPv6-selected node."""
+        if not self.is_ipv6_node(selected_ip):
+            return None
+        with self.lock:
+            pool = list(self.config.get("ip_pool", []))
+            meta_cache = dict(self.ip_meta_cache)
+        meta = meta_cache.get(selected_ip)
+        if not isinstance(meta, dict):
+            return None
+        region = (meta.get("country_iso") or "").upper()
+        if not region:
+            return None
+        candidates = []
+        for ip in pool:
+            if ip == selected_ip:
+                continue
+            try:
+                ip2 = ipaddress.ip_address(ip)
+            except Exception:
+                continue
+            if not isinstance(ip2, ipaddress.IPv4Address):
+                continue
+            m = meta_cache.get(ip)
+            if not isinstance(m, dict):
+                continue
+            if (m.get("country_iso") or "").upper() != region:
+                continue
+            # Only accept real IPv4 nodes (skip nodes that resolve to IPv6).
+            if ip_version(m.get("real_ip")) != 4:
+                continue
+            ok = bool(m.get("ok")) if "ok" in m else False
+            ms = m.get("ms")
+            try:
+                ms_i = int(ms)
+            except Exception:
+                ms_i = None
+            candidates.append((ok, ms_i, ip))
+        if not candidates:
+            return None
+        ok_candidates = [c for c in candidates if c[0]]
+        pick_list = ok_candidates if ok_candidates else candidates
+        pick_list.sort(key=lambda x: (x[1] is None, x[1] if x[1] is not None else 10**9))
+        return pick_list[0][2]
 
     def _ensure_geoip_cn(self, force: bool = False):
         now = time.time()
@@ -1502,6 +1771,8 @@ class ConfigManager:
                 if not net:
                     continue
                 if ip_objs is None:
+                    if rule.get("no_resolve"):
+                        continue
                     return None
                 for ip_obj in ip_objs or []:
                     try:
@@ -1529,6 +1800,74 @@ class ConfigManager:
             if kind in ("MATCH", "FINAL"):
                 return rule.get("target")
         return "DIRECT"
+
+    def explain_policy_target(self, qname: str, ip_objs=None):
+        """Return (target, matched_rule). target may be None if IPs are required."""
+        with self.lock:
+            pol = self.clash_policy
+        if not pol:
+            return "DIRECT", None
+        name = (qname or "").lower().rstrip(".")
+        if not name:
+            return "DIRECT", None
+        for rule in pol.rules or []:
+            kind = rule.get("kind")
+            if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
+                val = rule.get("value") or ""
+                if kind == "DOMAIN" and name == val:
+                    return rule.get("target"), rule
+                if kind == "DOMAIN-SUFFIX" and val and self._match_domain_suffix(name, val):
+                    return rule.get("target"), rule
+                if kind == "DOMAIN-KEYWORD" and val and val in name:
+                    return rule.get("target"), rule
+                continue
+            if kind == "RULE-SET":
+                prov_key = rule.get("value")
+                prov = (pol.providers or {}).get(prov_key)
+                if not prov:
+                    continue
+                if prov.match_domain(name):
+                    return rule.get("target"), rule
+                if prov.has_ip_rules:
+                    if ip_objs is None:
+                        return None, rule
+                    if prov.match_ips(ip_objs):
+                        return rule.get("target"), rule
+                continue
+            if kind in ("IP-CIDR", "IP-CIDR6"):
+                net = rule.get("net")
+                if not net:
+                    continue
+                if ip_objs is None:
+                    if rule.get("no_resolve"):
+                        continue
+                    return None, rule
+                for ip_obj in ip_objs or []:
+                    try:
+                        if ip_obj.version == net.version and ip_obj in net:
+                            return rule.get("target"), rule
+                    except Exception:
+                        continue
+                continue
+            if kind in ("GEOIP",):
+                cc = (rule.get("value") or "").upper()
+                if ip_objs is None:
+                    return None, rule
+                if cc == "CN":
+                    self._ensure_geoip_cn()
+                    with self.lock:
+                        trie = self.geoip_cn_trie
+                    if trie:
+                        for ip_obj in ip_objs or []:
+                            try:
+                                if isinstance(ip_obj, ipaddress.IPv4Address) and trie.contains(ip_obj):
+                                    return rule.get("target"), rule
+                            except Exception:
+                                continue
+                continue
+            if kind in ("MATCH", "FINAL"):
+                return rule.get("target"), rule
+        return "DIRECT", None
 
     def decide_route(self, qname: str, ips: Optional[List[str]] = None):
         """Return ('ip', ip) / ('upstream', upstream_dns) / ('reject', None) / None(needs upstream ips)."""
@@ -1768,11 +2107,20 @@ def build_aaaa_response(query: bytes, ip_str: str, qend: int) -> bytes:
 
 def forward_query(upstream: str, query: bytes, timeout_ms: int) -> bytes:
     """Forward DNS query to an upstream resolver and return its response."""
-    addr = (upstream, 53)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(timeout_ms / 1000.0)
-        s.sendto(query, addr)
-        return s.recvfrom(4096)[0]
+    last_err = None
+    infos = socket.getaddrinfo(upstream, 53, proto=socket.IPPROTO_UDP)
+    for family, socktype, proto, _canon, sockaddr in infos:
+        try:
+            with socket.socket(family, socktype) as s:
+                s.settimeout(timeout_ms / 1000.0)
+                s.sendto(query, sockaddr)
+                return s.recvfrom(4096)[0]
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err:
+        raise last_err
+    raise OSError("upstream query failed")
 
 
 def _read_name(packet: bytes, offset: int) -> Tuple[Optional[str], int]:
@@ -1871,6 +2219,47 @@ def extract_aaaa_records(resp: bytes) -> List[str]:
     return ips
 
 
+def build_dns_query(qname: str, qtype: int = 1) -> bytes:
+    """Build a simple DNS query (RD=1) for qname."""
+    name = (qname or "").strip().rstrip(".")
+    if not name:
+        raise ValueError("empty qname")
+    labels = name.split(".")
+    parts = []
+    for label in labels:
+        if not label:
+            continue
+        if len(label) > 63:
+            raise ValueError("label too long")
+        parts.append(len(label).to_bytes(1, "big"))
+        parts.append(label.encode("utf-8", errors="ignore"))
+    qname_bytes = b"".join(parts) + b"\x00"
+    qtype = int(qtype)
+    qclass = 1
+    msg_id = int.from_bytes(os.urandom(2), "big")
+    flags = 0x0100  # RD
+    header = (
+        msg_id.to_bytes(2, "big")
+        + flags.to_bytes(2, "big")
+        + (1).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+    )
+    question = qname_bytes + qtype.to_bytes(2, "big") + qclass.to_bytes(2, "big")
+    return header + question
+
+
+def query_upstream_records(qname: str, qtype: int, upstream_dns: str, timeout_ms: int) -> List[str]:
+    try:
+        query = build_dns_query(qname, qtype=qtype)
+        resp = forward_query(upstream_dns, query, timeout_ms)
+    except Exception:
+        return []
+    if qtype == 28:
+        return extract_aaaa_records(resp)
+    return extract_a_records(resp)
+
 def match_ips_to_cidr(ips: List[str], cidr_rules) -> Optional[Tuple[str, str]]:
     """Return (cat, svc) if any IP hits a CIDR rule."""
     if not ips or not cidr_rules:
@@ -1907,6 +2296,15 @@ def process_query(data: bytes, client_addr, server_sock: socket.socket, cfg: Con
         timeout_ms = snapshot.get("timeout_ms", 2000)
         upstream_dns = snapshot.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
 
+        def check_upstream_aaaa():
+            q_aaaa = data if qtype == 28 else patch_question_qtype(data, qend, 28)
+            try:
+                resp = forward_query(upstream_dns, q_aaaa, timeout_ms)
+            except Exception:
+                return False, None
+            ips6 = extract_aaaa_records(resp)
+            return bool(ips6), resp
+
         # Only override A/AAAA; other types always upstream
         if qtype not in (1, 28):
             try:
@@ -1915,7 +2313,7 @@ def process_query(data: bytes, client_addr, server_sock: socket.socket, cfg: Con
                 response = build_servfail(data)
         elif qtype == 28:
             # For AAAA:
-            # - if matched to a specific IPv6 -> answer
+            # - if matched to a specific IPv6 -> answer (only if upstream has AAAA)
             # - if matched to a specific IPv4 -> empty (force v4)
             # - only DIRECT can freely ask upstream for AAAA
             decision = cfg.decide_route(qname, ips=None)
@@ -1932,24 +2330,30 @@ def process_query(data: bytes, client_addr, server_sock: socket.socket, cfg: Con
                     decision = ("upstream", upstream_dns)
 
             if decision and decision[0] == "ip" and decision[1]:
-                try:
-                    ip_obj = ipaddress.ip_address(decision[1])
-                    if isinstance(ip_obj, ipaddress.IPv6Address):
-                        response = build_aaaa_response(data, decision[1], qend)
-                    else:
+                node_ipv6 = cfg.is_ipv6_node(decision[1])
+                if node_ipv6:
+                    has_aaaa, upstream_aaaa = check_upstream_aaaa()
+                    if not has_aaaa:
                         response = build_empty_response(data)
-                except Exception:
+                    else:
+                        if ip_version(decision[1]) == 6:
+                            response = build_aaaa_response(data, decision[1], qend)
+                        else:
+                            response = build_empty_response(data)
+                else:
                     response = build_empty_response(data)
             elif decision and decision[0] == "reject":
                 response = build_empty_response(data)
             else:
+                dns = decision[1] if decision and len(decision) > 1 and decision[1] else upstream_dns
                 try:
-                    response = forward_query(upstream_dns, data, timeout_ms)
+                    response = forward_query(dns, data, timeout_ms)
                 except Exception:
                     response = build_servfail(data)
         else:
             # A record
             decision = cfg.decide_route(qname, ips=None)
+            upstream_resp = None
             if decision is None:
                 # Need upstream A records to evaluate IP-based rules
                 try:
@@ -1960,37 +2364,46 @@ def process_query(data: bytes, client_addr, server_sock: socket.socket, cfg: Con
                 decision = cfg.decide_route(qname, ips=ips)
                 if decision is None:
                     decision = ("upstream", upstream_dns)
-                if decision[0] == "ip" and decision[1]:
-                    try:
-                        ip_obj = ipaddress.ip_address(decision[1])
-                        if isinstance(ip_obj, ipaddress.IPv4Address):
+
+            if decision and decision[0] == "ip" and decision[1]:
+                node_ipv6 = cfg.is_ipv6_node(decision[1])
+                if node_ipv6:
+                    has_aaaa, _ = check_upstream_aaaa()
+                    if has_aaaa:
+                        if ip_version(decision[1]) == 4:
                             response = build_a_response(data, decision[1], qend)
                         else:
                             response = build_empty_response(data)
-                    except Exception:
-                        response = build_empty_response(data)
-                elif decision[0] == "reject":
-                    response = build_empty_response(data)
+                    else:
+                        fallback_ip = cfg.pick_region_fallback_ipv4(decision[1])
+                        if fallback_ip:
+                            response = build_a_response(data, fallback_ip, qend)
+                        else:
+                            if upstream_resp is None:
+                                try:
+                                    upstream_resp = forward_query(upstream_dns, data, timeout_ms)
+                                except Exception:
+                                    upstream_resp = build_servfail(data)
+                            response = upstream_resp
                 else:
-                    response = upstream_resp
+                    try:
+                        ip_obj = ipaddress.ip_address(decision[1])
+                    except Exception:
+                        ip_obj = None
+                    if isinstance(ip_obj, ipaddress.IPv4Address):
+                        response = build_a_response(data, decision[1], qend)
+                    else:
+                        response = build_empty_response(data)
+            elif decision and decision[0] == "reject":
+                response = build_empty_response(data)
             else:
-                if decision[0] == "ip" and decision[1]:
+                dns = decision[1] if decision and len(decision) > 1 and decision[1] else upstream_dns
+                if upstream_resp is None or dns != upstream_dns:
                     try:
-                        ip_obj = ipaddress.ip_address(decision[1])
-                        if isinstance(ip_obj, ipaddress.IPv4Address):
-                            response = build_a_response(data, decision[1], qend)
-                        else:
-                            response = build_empty_response(data)
+                        upstream_resp = forward_query(dns, data, timeout_ms)
                     except Exception:
-                        response = build_empty_response(data)
-                elif decision[0] == "reject":
-                    response = build_empty_response(data)
-                else:
-                    dns = decision[1] if decision and len(decision) > 1 and decision[1] else upstream_dns
-                    try:
-                        response = forward_query(dns, data, timeout_ms)
-                    except Exception:
-                        response = build_servfail(data)
+                        upstream_resp = build_servfail(data)
+                response = upstream_resp
     try:
         server_sock.sendto(response, client_addr)
     except Exception:
@@ -2064,6 +2477,113 @@ class WebHandler(BaseHTTPRequestHandler):
             ip_meta = self.cfg.peek_ip_meta()
             html_section = self.render_group_section(cfg, ip_pool, upstream_dns, ip_meta)
             return self._send(200, html_section.encode("utf-8"), "text/html; charset=utf-8")
+        if path.endswith("api/domain_check"):
+            raw = qs.get("domain", [""])[0]
+            domain = (raw or "").strip()
+            if "://" in domain:
+                try:
+                    p = urlparse(domain)
+                    domain = p.hostname or domain
+                except Exception:
+                    pass
+            domain = (domain or "").strip().rstrip(".")
+            if not domain or not re.match(r"^[A-Za-z0-9.-]+$", domain):
+                return self._send(400, b"Bad Request: invalid domain", "text/plain; charset=utf-8")
+            _, snap = self.cfg.get_snapshot()
+            upstream_dns = snap.get("upstream_dns", DEFAULT_CONFIG["upstream_dns"])
+            timeout_ms = snap.get("timeout_ms", 2000)
+            ip_pool = snap.get("ip_pool", []) or []
+            ip_meta = self.cfg.peek_ip_meta()
+            proxies = build_proxy_catalog(ip_pool, ip_meta)
+            pol = self.cfg.clash_policy
+
+            lines = []
+            lines.append(f"域名: {domain}")
+            lines.append(f"策略类型: {getattr(pol, 'kind', '-') if pol else '-'}")
+
+            ips_a = []
+            rule_target, rule_info = self.cfg.explain_policy_target(domain, ip_objs=None)
+            if rule_target is None:
+                ips_a = query_upstream_records(domain, 1, upstream_dns, timeout_ms)
+                ip_objs = []
+                for ip_s in ips_a:
+                    try:
+                        ip_objs.append(ipaddress.ip_address(ip_s))
+                    except Exception:
+                        continue
+                rule_target, rule_info = self.cfg.explain_policy_target(domain, ip_objs=ip_objs)
+
+            if rule_info:
+                kind = rule_info.get("kind")
+                value = rule_info.get("value")
+                target = rule_info.get("target")
+                if kind == "RULE-SET":
+                    lines.append(f"命中规则: RULE-SET -> {target} ({value})")
+                elif kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
+                    lines.append(f"命中规则: {kind} {value} -> {target}")
+                elif kind in ("IP-CIDR", "IP-CIDR6", "GEOIP"):
+                    lines.append(f"命中规则: {kind} {value} -> {target}")
+                elif kind in ("MATCH", "FINAL"):
+                    lines.append(f"命中规则: FINAL -> {target}")
+            else:
+                lines.append("命中规则: (无) -> DIRECT")
+
+            if ips_a:
+                lines.append(f"上游A: {', '.join(ips_a)}")
+
+            if rule_target is None:
+                rule_target = "DIRECT"
+
+            if pol and isinstance(getattr(pol, "groups", None), dict) and rule_target in pol.groups:
+                chain = self.cfg.resolve_chain(rule_target, proxies, allow_probe=False)
+                if chain:
+                    lines.append("分组链: " + " -> ".join([str(x) for x in chain]))
+
+            decision = self.cfg.decide_route(domain, ips=ips_a or None)
+            if decision is None:
+                decision = ("upstream", upstream_dns)
+
+            if decision[0] == "reject":
+                lines.append("A结果: REJECT")
+            elif decision[0] == "upstream":
+                if not ips_a:
+                    ips_a = query_upstream_records(domain, 1, upstream_dns, timeout_ms)
+                if ips_a:
+                    lines.append(f"A结果: DIRECT -> {', '.join(ips_a)}")
+                else:
+                    lines.append("A结果: DIRECT -> (无返回)")
+            elif decision[0] == "ip" and decision[1]:
+                sel_ip = str(decision[1])
+                node_ipv6 = self.cfg.is_ipv6_node(sel_ip)
+                if node_ipv6:
+                    ips_aaaa = query_upstream_records(domain, 28, upstream_dns, timeout_ms)
+                    lines.append(f"上游AAAA: {', '.join(ips_aaaa) if ips_aaaa else '-'}")
+                    if ips_aaaa:
+                        if ip_version(sel_ip) == 4:
+                            lines.append(f"A结果: {sel_ip}（IPv6可用）")
+                        else:
+                            lines.append("A结果: 空（IPv6可用，节点为IPv6）")
+                    else:
+                        fallback_ip = self.cfg.pick_region_fallback_ipv4(sel_ip)
+                        if fallback_ip:
+                            lines.append(f"A结果: {fallback_ip}（同区域IPv4回退）")
+                        else:
+                            if not ips_a:
+                                ips_a = query_upstream_records(domain, 1, upstream_dns, timeout_ms)
+                            if ips_a:
+                                lines.append(f"A结果: DIRECT -> {', '.join(ips_a)}")
+                            else:
+                                lines.append("A结果: DIRECT -> (无返回)")
+                else:
+                    if ip_version(sel_ip) == 4:
+                        lines.append(f"A结果: {sel_ip}")
+                    else:
+                        lines.append("A结果: 空（节点非IPv6且为IPv6地址）")
+            else:
+                lines.append("A结果: DIRECT")
+
+            payload = {"domain": domain, "lines": lines}
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json")
         return self._send(200, self.render_dashboard().encode("utf-8"))
 
     def do_POST(self):

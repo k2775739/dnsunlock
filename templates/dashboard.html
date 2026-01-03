@@ -357,7 +357,7 @@
             ${ip_chips}
           </div>
           <div class="input-row">
-            <input name="ip_input" id="ip-input" placeholder="输入 IP 后点击添加" inputmode="numeric" pattern="^(\d{1,3}\.){3}\d{1,3}$" title="仅允许IPv4地址" />
+            <input name="ip_input" id="ip-input" placeholder="输入 IP 后点击添加" inputmode="text" title="允许 IPv4 / IPv6 地址" />
             <button class="btn" type="button" id="add-ip">添加</button>
           </div>
         </div>
@@ -403,9 +403,19 @@
             ${dns_chips}
           </div>
           <div class="input-row">
-            <input name="dns_input" id="dns-input" placeholder="输入上游 DNS 后点击添加" inputmode="numeric" pattern="^(\d{1,3}\.){3}\d{1,3}$" title="仅允许IPv4地址" />
+            <input name="dns_input" id="dns-input" placeholder="输入上游 DNS 后点击添加" inputmode="text" title="允许 IPv4 / IPv6 地址" />
             <button class="btn" type="button" id="add-dns">添加</button>
           </div>
+        </div>
+        <div class="chip-bar" style="margin-top:14px;">
+          <div class="chip-head">
+            <span style="color:var(--muted);font-size:13px;">域名检查</span>
+          </div>
+          <div class="input-row">
+            <input id="domain-check-input" placeholder="输入域名，如 openai.com" />
+            <button class="btn" type="button" id="domain-check-btn">检查</button>
+          </div>
+          <pre id="domain-check-result" style="margin:8px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;color:var(--muted);font-size:12px;min-height:60px;"></pre>
         </div>
 	        <p style="margin-top:10px;color:var(--muted);font-size:12px;">监听 DNS: ${listen_host}:${dns_port} · Web: ${web_host}:${web_port}</p>
 	        </section>
@@ -498,7 +508,7 @@
           const span = document.createElement('span');
           span.className = 'chip';
           span.dataset.ip = val;
-          span.textContent = val;
+          span.textContent = formatBaseIpLabel(val);
           if (prefix === 'dns' && !window.activeUpstream) {
             span.classList.add('active');
             window.activeUpstream = val;
@@ -518,6 +528,18 @@
 
     const getIps = setupChipManager('ip');
     const getDns = setupChipManager('dns');
+
+    function applyVersionToChips(listSelector, force=false) {
+      document.querySelectorAll(`${listSelector} .chip`).forEach(chip => {
+        const ip = (chip.dataset.ip || '').trim() || chip.textContent.trim();
+        if (!ip) return;
+        if (force || chip.textContent.trim() === ip.trim()) {
+          chip.textContent = formatBaseIpLabel(ip);
+        }
+      });
+    }
+    applyVersionToChips('#chip-list-ip');
+    applyVersionToChips('#chip-list-dns', true);
 
     document.getElementById('refresh-ipinfo')?.addEventListener('click', () => refreshIpMeta(true));
 
@@ -561,10 +583,33 @@
       return postForm('./save_upstreams?${token_query}', params);
     }
 
-    const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
-    function isValidIp(ip) {
-      if (!ipRegex.test(ip)) return false;
+    function isValidIPv4(ip) {
+      if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) return false;
       return ip.split('.').every(o => Number(o) >= 0 && Number(o) <= 255);
+    }
+    function isValidIPv6(ip) {
+      if (!/^[0-9a-fA-F:]+$/.test(ip)) return false;
+      if ((ip.match(/::/g) || []).length > 1) return false;
+      const parts = ip.split(':');
+      if (ip.includes('::')) {
+        if (parts.length > 8) return false;
+      } else {
+        if (parts.length !== 8) return false;
+      }
+      for (const p of parts) {
+        if (!p) continue;
+        if (p.length > 4) return false;
+      }
+      return true;
+    }
+    function isValidIp(ip) {
+      return isValidIPv4(ip) || isValidIPv6(ip);
+    }
+    function ipVersionLabel(ip) {
+      return String(ip || '').includes(':') ? 'IPV6' : 'IPV4';
+    }
+    function formatBaseIpLabel(ip) {
+      return `${ip} · ${ipVersionLabel(ip)}`;
     }
 
     async function submitIpPool() {
@@ -779,6 +824,9 @@
       window.__ipMetaCache = window.__ipMetaCache || {};
       window.__ipMetaCache[ip] = info;
       const dispMs = (info && Number.isFinite(info.ms)) ? Math.round(info.ms / 2) : null;
+      const ipVer = ipVersionLabel(ip);
+      const realIp = (info && info.real_ip && info.real_ip !== ip) ? info.real_ip : '';
+      const realVer = realIp ? ipVersionLabel(realIp) : '';
       // 更新 IP 池芯片
       const chip = document.querySelector(`#chip-list-ip .chip[data-ip="${ip}"]`);
       if (chip) {
@@ -789,13 +837,17 @@
           if (info.country_iso) parts.push(info.country_iso);
           if (info.asn_org) parts.push(info.asn_org);
           if (dispMs !== null) parts.push(`${dispMs}ms`);
-          if (info.real_ip && info.real_ip !== ip) parts.push(info.real_ip);
+          if (realIp) {
+            parts.push(`${realIp}/${realVer}`);
+          } else {
+            parts.push(ipVer);
+          }
           const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
           chip.textContent = `${ip}${extra}`;
         } else {
           chip.classList.add('fail');
           const msPart = (dispMs !== null) ? ` · ${dispMs}ms` : '';
-          chip.textContent = `${ip}${msPart} · 错误`;
+          chip.textContent = `${ip}${msPart} · ${ipVer} · 错误`;
         }
       }
       // 同步更新所有下拉选项的显示与颜色
@@ -805,8 +857,16 @@
         const RED = '#c70000';
         const msPart = (dispMs !== null) ? ` · ${dispMs}ms` : '';
         if (info && info.ok) {
-          const ccPart = info.country_iso ? ` · ${info.country_iso}` : '';
-          opt.textContent = `${ip}${ccPart}${msPart}`;
+          const parts = [];
+          if (info.country_iso) parts.push(info.country_iso);
+          if (dispMs !== null) parts.push(`${dispMs}ms`);
+          if (realIp) {
+            parts.push(`${realIp}/${realVer}`);
+          } else {
+            parts.push(ipVer);
+          }
+          const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
+          opt.textContent = `${ip}${extra}`;
           opt.classList.add('ok');
           opt.classList.remove('fail');
           opt.style.color = GREEN;
@@ -814,7 +874,7 @@
             opt.parentElement.style.color = GREEN;
           }
         } else {
-          opt.textContent = `${ip}${msPart} · 错误`;
+          opt.textContent = `${ip}${msPart} · ${ipVer} · 错误`;
           opt.classList.add('fail');
           opt.classList.remove('ok');
           opt.style.color = RED;
@@ -859,6 +919,35 @@
         sel.style.color = '';
       }
     }
+
+    // ---- 域名检查 ----
+    const domainInput = document.getElementById('domain-check-input');
+    const domainBtn = document.getElementById('domain-check-btn');
+    const domainResult = document.getElementById('domain-check-result');
+    async function runDomainCheck() {
+      const raw = (domainInput?.value || '').trim();
+      if (!raw) { showToast('请输入域名'); return; }
+      if (domainResult) domainResult.textContent = '查询中...';
+      try {
+        const res = await fetch(`./api/domain_check?${token_query}&domain=${encodeURIComponent(raw)}`);
+        if (!res.ok) {
+          const msg = await res.text().catch(() => '');
+          if (domainResult) domainResult.textContent = msg || '查询失败';
+          return;
+        }
+        const data = await res.json();
+        if (domainResult) domainResult.textContent = Array.isArray(data?.lines) ? data.lines.join('\n') : JSON.stringify(data, null, 2);
+      } catch (e) {
+        if (domainResult) domainResult.textContent = '查询失败';
+      }
+    }
+    domainBtn?.addEventListener('click', runDomainCheck);
+    domainInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        runDomainCheck();
+      }
+    });
   </script>
 </body>
 </html>

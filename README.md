@@ -77,6 +77,7 @@ python3 app.py
 - 默认使用本地 `local_group.ini` 作为 Clash 策略（自动加载）；可在面板切换为“网络策略链接”
 - 本地策略文件位置固定，但可在网页弹框内直接编辑并保存
 - 支持读取 Clash 策略：订阅转换器常见 `.ini`（ACL4SSR 风格）与标准 `config.yaml`
+- 网络策略链接额外支持 Shadowrocket `.conf`（读取 `[Proxy Group]` / `[Rule]`）
 - 以 `ip_pool` 作为“可选节点（proxies）”，分流组选择等同 Clash：选择某 IP = DNS 直接返回该 IP；选择 `DIRECT` = 使用上游 DNS 正常解析
 - `url-test`/`fallback`/`load-balance` 组按 Clash 逻辑自动探测延迟并选最快节点（使用策略里配置的 `url`，如 `http://www.gstatic.com/generate_204`）
 - IP 池探测支持 `netvigator` / `ifconfig` 两个站点（默认 `netvigator`）
