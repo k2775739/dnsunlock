@@ -33,5 +33,6 @@
     "1.1.1.1",
     "8.8.8.8"
   ],
-  "clash_profile_source": "local"
+  "clash_profile_source": "local",
+  "clash_rule_overrides": {}
 }

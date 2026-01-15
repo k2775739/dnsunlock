@@ -105,6 +105,13 @@
       font-size: 12px;
       margin-left: 8px;
     }
+    .pill.rule-pill {
+      cursor: pointer;
+      border: 1px solid #d6e3ff;
+    }
+    .pill.rule-pill:hover {
+      background: #e1ecff;
+    }
     .grid-2 {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -439,6 +446,33 @@
         </div>
       </section>
     </div>
+    <div class="modal" id="group-rules-modal" aria-hidden="true">
+      <section class="card modal-card">
+        <div class="row-head" style="margin-bottom:10px;">
+          <span style="font-weight:600;" id="group-rules-title">编辑分流组规则</span>
+          <button type="button" class="ghost-btn" id="group-rules-close">关闭</button>
+        </div>
+        <p style="color:var(--muted);font-size:12px;margin:0 0 10px;">
+          说明：每行一条规则，支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR / IP-CIDR6 / GEOIP / RULE-SET / MATCH。
+        </p>
+        <div class="row">
+          <label>新增规则</label>
+          <textarea id="group-rules-add" spellcheck="false" placeholder="示例：DOMAIN-SUFFIX,example.com"></textarea>
+        </div>
+        <div class="row">
+          <label>删除规则</label>
+          <textarea id="group-rules-del" spellcheck="false" placeholder="示例：DOMAIN-SUFFIX,example.com"></textarea>
+        </div>
+        <div class="row">
+          <label>基础规则（只读）</label>
+          <textarea id="group-rules-base" spellcheck="false" readonly placeholder="当前分组基础规则"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="group-rules-cancel">取消</button>
+          <button type="button" class="btn" id="group-rules-save">保存</button>
+        </div>
+      </section>
+    </div>
 	  <script>
     // Toast
     const toast = document.createElement('div');
@@ -754,6 +788,76 @@
       showToast('后台刷新策略中...');
       try { await fetch('./refresh_rules?${token_query}', {method: 'POST'}); } catch (_) {}
       pollRules(initialRulesTs || 0);
+    });
+
+    // ---- 分流组规则编辑弹框 ----
+    const groupRulesModal = document.getElementById('group-rules-modal');
+    const groupRulesTitle = document.getElementById('group-rules-title');
+    const groupRulesAdd = document.getElementById('group-rules-add');
+    const groupRulesDel = document.getElementById('group-rules-del');
+    const groupRulesBase = document.getElementById('group-rules-base');
+    let activeGroupName = '';
+
+    function openGroupRulesModal(groupName) {
+      if (!groupName) return;
+      activeGroupName = groupName;
+      if (groupRulesTitle) groupRulesTitle.textContent = `编辑分流组规则：${groupName}`;
+      if (groupRulesAdd) { groupRulesAdd.disabled = true; groupRulesAdd.value = '加载中...'; }
+      if (groupRulesDel) { groupRulesDel.disabled = true; groupRulesDel.value = '加载中...'; }
+      if (groupRulesBase) { groupRulesBase.disabled = true; groupRulesBase.value = '加载中...'; }
+      groupRulesModal?.classList.add('show');
+      groupRulesModal?.setAttribute('aria-hidden', 'false');
+      fetch(`./api/group_rules?${token_query}&group=${encodeURIComponent(groupName)}`)
+        .then(r => r.json())
+        .then(data => {
+          if (groupRulesAdd) groupRulesAdd.value = Array.isArray(data?.add) ? data.add.join('\n') : '';
+          if (groupRulesDel) groupRulesDel.value = Array.isArray(data?.del) ? data.del.join('\n') : '';
+          if (groupRulesBase) groupRulesBase.value = Array.isArray(data?.base) ? data.base.join('\n') : '';
+        })
+        .catch(() => {
+          if (groupRulesAdd) groupRulesAdd.value = '';
+          if (groupRulesDel) groupRulesDel.value = '';
+          if (groupRulesBase) groupRulesBase.value = '';
+          showToast('读取规则失败');
+        })
+        .finally(() => {
+          if (groupRulesAdd) groupRulesAdd.disabled = false;
+          if (groupRulesDel) groupRulesDel.disabled = false;
+          if (groupRulesBase) groupRulesBase.disabled = false;
+          groupRulesAdd?.focus();
+        });
+    }
+
+    function closeGroupRulesModal() {
+      groupRulesModal?.classList.remove('show');
+      groupRulesModal?.setAttribute('aria-hidden', 'true');
+    }
+
+    document.getElementById('group-rules-close')?.addEventListener('click', closeGroupRulesModal);
+    document.getElementById('group-rules-cancel')?.addEventListener('click', closeGroupRulesModal);
+    groupRulesModal?.addEventListener('click', (e) => { if (e.target === groupRulesModal) closeGroupRulesModal(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && groupRulesModal?.classList.contains('show')) closeGroupRulesModal();
+    });
+
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('.rule-pill');
+      if (!btn) return;
+      const group = btn.dataset.group;
+      if (!group) return;
+      openGroupRulesModal(group);
+    });
+
+    document.getElementById('group-rules-save')?.addEventListener('click', async () => {
+      if (!activeGroupName) return;
+      const p = new URLSearchParams();
+      p.set('group', activeGroupName);
+      p.set('add_text', groupRulesAdd?.value || '');
+      p.set('del_text', groupRulesDel?.value || '');
+      const ok = await postForm('./save_group_rules?${token_query}', p);
+      if (!ok) return;
+      closeGroupRulesModal();
+      refreshGroupSection();
     });
 
     // ---- Clash 分流组：动态刷新分组区块（避免手动刷新网页） ----

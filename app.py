@@ -63,6 +63,8 @@ DEFAULT_CONFIG = {
     "clash_cache_dir": "clash_cache",
     # 仅对 type=select 的分组生效：group_name -> selected_member
     "clash_group_selection": {},
+    # 分流组规则增删（按策略来源/链接分组保存）
+    "clash_rule_overrides": {},
     # GEOIP,CN 的近似实现：使用公开 CN IP 段列表（非 MaxMind mmdb）
     "geoip_cn_url": "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt",
     "token": "changeme",
@@ -373,6 +375,10 @@ def ensure_config():
     if not isinstance(cfg.get("clash_group_selection"), dict):
         cfg["clash_group_selection"] = {}
         dirty = True
+    # Normalize clash_rule_overrides
+    if not isinstance(cfg.get("clash_rule_overrides"), dict):
+        cfg["clash_rule_overrides"] = {}
+        dirty = True
     # Normalize geoip_cn_url
     if isinstance(cfg.get("geoip_cn_url"), str) and "\n" in cfg["geoip_cn_url"]:
         first = cfg["geoip_cn_url"].splitlines()[0].strip()
@@ -611,9 +617,8 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def fetch_text_cached(url: str, cache_dir: str, suffix: str = ".txt", timeout: int = 15, force: bool = False) -> str:
     """Fetch URL text with on-disk cache; on failure, fall back to cached copy."""
-    safe_url = _validate_remote_url(url)
-    dest = _url_cache_path(cache_dir, safe_url, suffix=suffix)
-    legacy_dest = os.path.join(cache_dir, f"{hashlib.sha1(safe_url.encode('utf-8')).hexdigest()[:16]}{suffix}")
+    dest = _url_cache_path(cache_dir, url, suffix=suffix)
+    legacy_dest = os.path.join(cache_dir, f"{hashlib.sha1(str(url or '').encode('utf-8')).hexdigest()[:16]}{suffix}")
     if not force and os.path.exists(dest):
         try:
             if os.path.getsize(dest) > MAX_FETCH_BYTES:
@@ -638,6 +643,10 @@ def fetch_text_cached(url: str, cache_dir: str, suffix: str = ".txt", timeout: i
             return text
         except Exception:
             pass
+    safe_url = _validate_remote_url(url)
+    # Recompute destinations using normalized URL (for cache consistency after validation).
+    dest = _url_cache_path(cache_dir, safe_url, suffix=suffix)
+    legacy_dest = os.path.join(cache_dir, f"{hashlib.sha1(safe_url.encode('utf-8')).hexdigest()[:16]}{suffix}")
     tmp = dest + ".tmp"
     try:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -731,6 +740,116 @@ def parse_clash_rule_token(token: str):
             return (kind, parts[1])
         return None
     return None
+
+
+def _split_rule_lines(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.replace("\r\n", "\n").replace("\r", "\n")
+        return [ln.strip() for ln in raw.split("\n") if ln.strip()]
+    if isinstance(value, list):
+        lines = []
+        for item in value:
+            s = str(item).replace("\r\n", "\n").replace("\r", "\n")
+            lines.extend(s.split("\n"))
+        return [ln.strip() for ln in lines if ln.strip()]
+    return []
+
+
+def _rule_signature(rule: dict) -> str:
+    kind = (rule.get("kind") or "").upper()
+    if not kind:
+        return ""
+    if kind in ("MATCH", "FINAL"):
+        return "MATCH"
+    value = rule.get("value")
+    return f"{kind}:{value}" if value is not None else kind
+
+
+def _custom_rule_to_line(rule: dict) -> str:
+    kind = (rule.get("kind") or "").upper()
+    if not kind:
+        return ""
+    if kind in ("MATCH", "FINAL"):
+        return "MATCH"
+    value = rule.get("value")
+    if value is None:
+        return kind
+    return f"{kind},{value}"
+
+
+def _parse_custom_rule_line(raw: str) -> Optional[dict]:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.startswith(("#", ";", "//")):
+        return None
+    if s.startswith("-"):
+        s = s[1:].strip()
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return {"kind": "DOMAIN-SUFFIX", "value": parts[0].lower()}
+    kind = parts[0].upper()
+    if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
+        if len(parts) >= 2:
+            return {"kind": kind, "value": parts[1].lower()}
+        return None
+    if kind in ("IP-CIDR", "IP-CIDR6"):
+        if len(parts) < 2:
+            return None
+        try:
+            net = ipaddress.ip_network(parts[1], strict=False)
+        except Exception:
+            return None
+        if kind == "IP-CIDR" and not isinstance(net, ipaddress.IPv4Network):
+            return None
+        if kind == "IP-CIDR6" and not isinstance(net, ipaddress.IPv6Network):
+            return None
+        return {"kind": kind, "value": str(net), "net": net}
+    if kind == "GEOIP":
+        if len(parts) >= 2:
+            return {"kind": kind, "value": parts[1].upper()}
+        return None
+    if kind in ("MATCH", "FINAL"):
+        return {"kind": "MATCH"}
+    if kind == "RULE-SET":
+        if len(parts) >= 2:
+            return {"kind": kind, "value": parts[1]}
+        return None
+    return None
+
+
+def _parse_custom_rule_lines(lines: List[str], collect_errors: bool = False):
+    rules: List[dict] = []
+    errors: List[str] = []
+    seen = set()
+    for raw in lines:
+        s = (raw or "").strip()
+        if not s or s.startswith(("#", ";", "//")):
+            continue
+        parsed = _parse_custom_rule_line(s)
+        if not parsed:
+            if collect_errors:
+                errors.append(raw)
+            continue
+        sig = _rule_signature(parsed)
+        if sig and sig in seen:
+            continue
+        seen.add(sig)
+        rules.append(parsed)
+    return rules, errors
+
+
+def _normalize_custom_rule_text(text: str):
+    lines = _split_rule_lines(text or "")
+    rules, errors = _parse_custom_rule_lines(lines, collect_errors=True)
+    norm_lines = [ln for ln in (_custom_rule_to_line(r) for r in rules) if ln]
+    return norm_lines, errors
 
 
 class RuleProvider:
@@ -1316,6 +1435,203 @@ class ConfigManager:
             return [ln.strip() for ln in value.splitlines() if ln.strip()]
         return []
 
+    @staticmethod
+    def _policy_key_from_cfg(cfg: dict) -> str:
+        source = (cfg.get("clash_profile_source") or DEFAULT_CONFIG.get("clash_profile_source") or "local").strip().lower()
+        if source == "remote":
+            url = (cfg.get("clash_profile_url") or DEFAULT_CONFIG["clash_profile_url"]).strip()
+            return f"remote:{url}"
+        return f"local:{LOCAL_POLICY_FILENAME}"
+
+    def _policy_key(self) -> str:
+        return self._policy_key_from_cfg(self.config)
+
+    def _get_rule_overrides_parsed(self):
+        with self.lock:
+            overrides = self.config.get("clash_rule_overrides") if isinstance(self.config.get("clash_rule_overrides"), dict) else {}
+            policy_key = self._policy_key()
+            version = self._rule_override_version
+        cache = self._rule_override_cache if isinstance(self._rule_override_cache, dict) else {}
+        if cache.get("version") == version and cache.get("policy_key") == policy_key:
+            return cache.get("parsed") or {}, cache.get("counts") or {}
+
+        parsed = {}
+        counts = {}
+        raw_policy = overrides.get(policy_key, {}) if isinstance(overrides, dict) else {}
+        if isinstance(raw_policy, dict):
+            for group, data in raw_policy.items():
+                if not isinstance(data, dict):
+                    continue
+                add_lines = _split_rule_lines(data.get("add", []))
+                del_lines = _split_rule_lines(data.get("del", []))
+                add_rules, _ = _parse_custom_rule_lines(add_lines, collect_errors=False)
+                del_rules, _ = _parse_custom_rule_lines(del_lines, collect_errors=False)
+                parsed[group] = {"add": add_rules, "del": del_rules}
+                counts[group] = {"add": len(add_rules), "del": len(del_rules)}
+
+        self._rule_override_cache = {"version": version, "policy_key": policy_key, "parsed": parsed, "counts": counts}
+        return parsed, counts
+
+    def get_rule_override_counts(self):
+        _, counts = self._get_rule_overrides_parsed()
+        return counts
+
+    def get_group_rule_overrides(self, group: str):
+        group = str(group or "").strip()
+        if not group:
+            return [], []
+        with self.lock:
+            overrides = self.config.get("clash_rule_overrides") if isinstance(self.config.get("clash_rule_overrides"), dict) else {}
+            policy_key = self._policy_key()
+            grp = (overrides.get(policy_key) or {}).get(group, {}) if isinstance(overrides, dict) else {}
+        add_lines = _split_rule_lines(grp.get("add", [])) if isinstance(grp, dict) else []
+        del_lines = _split_rule_lines(grp.get("del", [])) if isinstance(grp, dict) else []
+        return add_lines, del_lines
+
+    def set_group_rule_overrides(self, group: str, add_lines: List[str], del_lines: List[str]) -> bool:
+        group = str(group or "").strip()
+        if not group:
+            return False
+        add_lines = _split_rule_lines(add_lines)
+        del_lines = _split_rule_lines(del_lines)
+        with self.lock:
+            overrides = self.config.get("clash_rule_overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+            policy_key = self._policy_key()
+            pol_over = overrides.get(policy_key)
+            if not isinstance(pol_over, dict):
+                pol_over = {}
+            if not add_lines and not del_lines:
+                if group in pol_over:
+                    pol_over.pop(group, None)
+            else:
+                pol_over[group] = {"add": add_lines, "del": del_lines}
+            if pol_over:
+                overrides[policy_key] = pol_over
+            else:
+                overrides.pop(policy_key, None)
+            self.config["clash_rule_overrides"] = overrides
+            self._rule_override_version += 1
+            self.save()
+        return True
+
+    def get_group_base_rules(self, group: str) -> List[str]:
+        group = str(group or "").strip()
+        if not group:
+            return []
+        with self.lock:
+            pol = self.clash_policy
+        if not pol:
+            return []
+        lines = []
+        for rule in pol.rules or []:
+            if rule.get("target") != group:
+                continue
+            kind = (rule.get("kind") or "").upper()
+            value = rule.get("value")
+            if kind == "RULE-SET":
+                if value:
+                    lines.append(f"RULE-SET,{value}")
+                continue
+            if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "GEOIP"):
+                if value:
+                    lines.append(f"{kind},{value}")
+                continue
+            if kind in ("MATCH", "FINAL"):
+                lines.append("MATCH")
+                continue
+        # de-dup preserve order
+        return list(dict.fromkeys(lines))
+
+    def _match_custom_rule(self, rule: dict, name: str, ip_objs=None) -> Optional[bool]:
+        kind = (rule.get("kind") or "").upper()
+        if not kind:
+            return False
+        if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
+            val = (rule.get("value") or "").lower()
+            if not val:
+                return False
+            if kind == "DOMAIN":
+                return name == val
+            if kind == "DOMAIN-SUFFIX":
+                return self._match_domain_suffix(name, val)
+            if kind == "DOMAIN-KEYWORD":
+                return val in name
+        if kind in ("IP-CIDR", "IP-CIDR6"):
+            if ip_objs is None:
+                return None
+            net = rule.get("net")
+            if not net:
+                try:
+                    net = ipaddress.ip_network(rule.get("value") or "", strict=False)
+                except Exception:
+                    return False
+            for ip_obj in ip_objs or []:
+                try:
+                    if ip_obj.version == net.version and ip_obj in net:
+                        return True
+                except Exception:
+                    continue
+            return False
+        if kind == "GEOIP":
+            if ip_objs is None:
+                return None
+            cc = (rule.get("value") or "").upper()
+            if cc == "CN":
+                self._ensure_geoip_cn()
+                with self.lock:
+                    trie = self.geoip_cn_trie
+                if trie:
+                    for ip_obj in ip_objs or []:
+                        try:
+                            if isinstance(ip_obj, ipaddress.IPv4Address) and trie.contains(ip_obj):
+                                return True
+                        except Exception:
+                            continue
+            return False
+        if kind == "RULE-SET":
+            prov_key = rule.get("value")
+            with self.lock:
+                pol = self.clash_policy
+            prov = (pol.providers or {}).get(prov_key) if pol else None
+            if not prov:
+                return False
+            if prov.match_domain(name):
+                return True
+            if prov.has_ip_rules:
+                if ip_objs is None:
+                    return None
+                if prov.match_ips(ip_objs):
+                    return True
+            return False
+        if kind in ("MATCH", "FINAL"):
+            return True
+        return False
+
+    def _deletion_blocks_rule(self, del_rules: List[dict], rule: dict, name: str, ip_objs=None) -> Optional[bool]:
+        if not del_rules:
+            return False
+        rule_kind = (rule.get("kind") or "").upper()
+        rule_value = rule.get("value")
+        for dr in del_rules:
+            kind = (dr.get("kind") or "").upper()
+            if not kind:
+                continue
+            if kind in ("RULE-SET",) and rule_kind == "RULE-SET":
+                if dr.get("value") == rule_value:
+                    return True
+                continue
+            if kind in ("MATCH", "FINAL") and rule_kind in ("MATCH", "FINAL"):
+                return True
+            if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "GEOIP"):
+                hit = self._match_custom_rule(dr, name, ip_objs=ip_objs)
+                if hit is None:
+                    return None
+                if hit:
+                    return True
+        return False
+
     def __init__(self, path: str):
         self.path = path
         self.lock = threading.RLock()
@@ -1336,6 +1652,8 @@ class ConfigManager:
         self.geoip_cn_trie = None
         self.geoip_cn_loaded_at = 0
         self.reloading = False
+        self._rule_override_version = 0
+        self._rule_override_cache = {"version": -1, "policy_key": None, "parsed": {}, "counts": {}}
         # Load policy in background to avoid blocking startup (remote fetch + IP meta warmup can be slow).
         try:
             self.reload_rules_async(force=False)
@@ -1742,16 +2060,50 @@ class ConfigManager:
         name = (qname or "").lower().rstrip(".")
         if not name:
             return "DIRECT"
+        overrides, _ = self._get_rule_overrides_parsed()
+        if overrides:
+            group_order = []
+            if pol and isinstance(getattr(pol, "groups", None), dict):
+                group_order = list(pol.groups.keys())
+            for g in overrides.keys():
+                if g not in group_order:
+                    group_order.append(g)
+            for g in group_order:
+                add_rules = (overrides.get(g) or {}).get("add") or []
+                for cr in add_rules:
+                    hit = self._match_custom_rule(cr, name, ip_objs=ip_objs)
+                    if hit is None:
+                        return None
+                    if hit:
+                        return g
         for rule in pol.rules or []:
             kind = rule.get("kind")
             if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
                 val = rule.get("value") or ""
                 if kind == "DOMAIN" and name == val:
-                    return rule.get("target")
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None
+                    if blocked:
+                        continue
+                    return target
                 if kind == "DOMAIN-SUFFIX" and val and self._match_domain_suffix(name, val):
-                    return rule.get("target")
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None
+                    if blocked:
+                        continue
+                    return target
                 if kind == "DOMAIN-KEYWORD" and val and val in name:
-                    return rule.get("target")
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None
+                    if blocked:
+                        continue
+                    return target
                 continue
             if kind == "RULE-SET":
                 prov_key = rule.get("value")
@@ -1759,12 +2111,24 @@ class ConfigManager:
                 if not prov:
                     continue
                 if prov.match_domain(name):
-                    return rule.get("target")
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None
+                    if blocked:
+                        continue
+                    return target
                 if prov.has_ip_rules:
                     if ip_objs is None:
                         return None
                     if prov.match_ips(ip_objs):
-                        return rule.get("target")
+                        target = rule.get("target")
+                        blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                        if blocked is None:
+                            return None
+                        if blocked:
+                            continue
+                        return target
                 continue
             if kind in ("IP-CIDR", "IP-CIDR6"):
                 net = rule.get("net")
@@ -1777,7 +2141,13 @@ class ConfigManager:
                 for ip_obj in ip_objs or []:
                     try:
                         if ip_obj.version == net.version and ip_obj in net:
-                            return rule.get("target")
+                            target = rule.get("target")
+                            blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                            if blocked is None:
+                                return None
+                            if blocked:
+                                break
+                            return target
                     except Exception:
                         continue
                 continue
@@ -1793,12 +2163,24 @@ class ConfigManager:
                         for ip_obj in ip_objs or []:
                             try:
                                 if isinstance(ip_obj, ipaddress.IPv4Address) and trie.contains(ip_obj):
-                                    return rule.get("target")
+                                    target = rule.get("target")
+                                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                                    if blocked is None:
+                                        return None
+                                    if blocked:
+                                        break
+                                    return target
                             except Exception:
                                 continue
                 continue
             if kind in ("MATCH", "FINAL"):
-                return rule.get("target")
+                target = rule.get("target")
+                blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                if blocked is None:
+                    return None
+                if blocked:
+                    continue
+                return target
         return "DIRECT"
 
     def explain_policy_target(self, qname: str, ip_objs=None):
@@ -1810,16 +2192,50 @@ class ConfigManager:
         name = (qname or "").lower().rstrip(".")
         if not name:
             return "DIRECT", None
+        overrides, _ = self._get_rule_overrides_parsed()
+        if overrides:
+            group_order = []
+            if pol and isinstance(getattr(pol, "groups", None), dict):
+                group_order = list(pol.groups.keys())
+            for g in overrides.keys():
+                if g not in group_order:
+                    group_order.append(g)
+            for g in group_order:
+                add_rules = (overrides.get(g) or {}).get("add") or []
+                for cr in add_rules:
+                    hit = self._match_custom_rule(cr, name, ip_objs=ip_objs)
+                    if hit is None:
+                        return None, {"kind": "CUSTOM", "target": g, "rule": cr}
+                    if hit:
+                        return g, {"kind": "CUSTOM", "target": g, "rule": cr}
         for rule in pol.rules or []:
             kind = rule.get("kind")
             if kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
                 val = rule.get("value") or ""
                 if kind == "DOMAIN" and name == val:
-                    return rule.get("target"), rule
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None, rule
+                    if blocked:
+                        continue
+                    return target, rule
                 if kind == "DOMAIN-SUFFIX" and val and self._match_domain_suffix(name, val):
-                    return rule.get("target"), rule
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None, rule
+                    if blocked:
+                        continue
+                    return target, rule
                 if kind == "DOMAIN-KEYWORD" and val and val in name:
-                    return rule.get("target"), rule
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None, rule
+                    if blocked:
+                        continue
+                    return target, rule
                 continue
             if kind == "RULE-SET":
                 prov_key = rule.get("value")
@@ -1827,12 +2243,24 @@ class ConfigManager:
                 if not prov:
                     continue
                 if prov.match_domain(name):
-                    return rule.get("target"), rule
+                    target = rule.get("target")
+                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                    if blocked is None:
+                        return None, rule
+                    if blocked:
+                        continue
+                    return target, rule
                 if prov.has_ip_rules:
                     if ip_objs is None:
                         return None, rule
                     if prov.match_ips(ip_objs):
-                        return rule.get("target"), rule
+                        target = rule.get("target")
+                        blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                        if blocked is None:
+                            return None, rule
+                        if blocked:
+                            continue
+                        return target, rule
                 continue
             if kind in ("IP-CIDR", "IP-CIDR6"):
                 net = rule.get("net")
@@ -1845,7 +2273,13 @@ class ConfigManager:
                 for ip_obj in ip_objs or []:
                     try:
                         if ip_obj.version == net.version and ip_obj in net:
-                            return rule.get("target"), rule
+                            target = rule.get("target")
+                            blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                            if blocked is None:
+                                return None, rule
+                            if blocked:
+                                break
+                            return target, rule
                     except Exception:
                         continue
                 continue
@@ -1861,12 +2295,24 @@ class ConfigManager:
                         for ip_obj in ip_objs or []:
                             try:
                                 if isinstance(ip_obj, ipaddress.IPv4Address) and trie.contains(ip_obj):
-                                    return rule.get("target"), rule
+                                    target = rule.get("target")
+                                    blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                                    if blocked is None:
+                                        return None, rule
+                                    if blocked:
+                                        break
+                                    return target, rule
                             except Exception:
                                 continue
                 continue
             if kind in ("MATCH", "FINAL"):
-                return rule.get("target"), rule
+                target = rule.get("target")
+                blocked = self._deletion_blocks_rule((overrides.get(target) or {}).get("del") or [], rule, name, ip_objs=ip_objs)
+                if blocked is None:
+                    return None, rule
+                if blocked:
+                    continue
+                return target, rule
         return "DIRECT", None
 
     def decide_route(self, qname: str, ips: Optional[List[str]] = None):
@@ -2469,6 +2915,14 @@ class WebHandler(BaseHTTPRequestHandler):
                 "reloading": snap.get("reloading", False),
             }
             return self._send(200, json.dumps(info).encode("utf-8"), "application/json")
+        if path.endswith("api/group_rules"):
+            group = (qs.get("group", [""])[0] or "").strip()
+            if not group:
+                return self._send(400, b"Bad Request: missing group", "text/plain; charset=utf-8")
+            add_lines, del_lines = self.cfg.get_group_rule_overrides(group)
+            base_lines = self.cfg.get_group_base_rules(group)
+            payload = {"group": group, "add": add_lines, "del": del_lines, "base": base_lines}
+            return self._send(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json")
         if path.endswith("api/group_section"):
             _, cfg = self.cfg.get_snapshot()
             ip_pool = cfg.get("ip_pool", []) or ["1.1.1.1"]
@@ -2517,7 +2971,19 @@ class WebHandler(BaseHTTPRequestHandler):
                 kind = rule_info.get("kind")
                 value = rule_info.get("value")
                 target = rule_info.get("target")
-                if kind == "RULE-SET":
+                if kind == "CUSTOM":
+                    cr = rule_info.get("rule") or {}
+                    ckind = cr.get("kind")
+                    cval = cr.get("value")
+                    if ckind == "RULE-SET":
+                        lines.append(f"命中规则: 自定义 RULE-SET -> {target} ({cval})")
+                    elif ckind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
+                        lines.append(f"命中规则: 自定义 {ckind} {cval} -> {target}")
+                    elif ckind in ("IP-CIDR", "IP-CIDR6", "GEOIP"):
+                        lines.append(f"命中规则: 自定义 {ckind} {cval} -> {target}")
+                    elif ckind in ("MATCH", "FINAL"):
+                        lines.append(f"命中规则: 自定义 FINAL -> {target}")
+                elif kind == "RULE-SET":
                     lines.append(f"命中规则: RULE-SET -> {target} ({value})")
                 elif kind in ("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"):
                     lines.append(f"命中规则: {kind} {value} -> {target}")
@@ -2665,6 +3131,21 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.cfg.set_clash_group_selected(group, val)
 
             self.cfg.update_ip_pool(new_ip_pool, new_upstream_dns, new_upstream_pool)
+        elif path.endswith("save_group_rules"):
+            group = (data.get("group", [""])[0] or "").strip()
+            if not group:
+                self._send(400, b"Bad Request: missing group", "text/plain; charset=utf-8")
+                return
+            add_text = data.get("add_text", [""])[0]
+            del_text = data.get("del_text", [""])[0]
+            add_lines, add_errors = _normalize_custom_rule_text(add_text)
+            del_lines, del_errors = _normalize_custom_rule_text(del_text)
+            errors = [e for e in (add_errors + del_errors) if str(e).strip()]
+            if errors:
+                msg = "Bad Request: invalid rules: " + "; ".join([str(e).strip()[:120] for e in errors[:5]])
+                self._send(400, msg.encode("utf-8"), "text/plain; charset=utf-8")
+                return
+            self.cfg.set_group_rule_overrides(group, add_lines, del_lines)
         elif path.endswith("save_local_policy"):
             text = data.get("text", [""])[0]
             try:
@@ -2796,6 +3277,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     prov = (pol.providers or {}).get(prov_key)
                     inc = int(getattr(prov, "count", 0) or 0)
                 rules_by_target[target] = rules_by_target.get(target, 0) + inc
+        override_counts = self.cfg.get_rule_override_counts()
 
         # --- Clash groups ---
         group_cards = []
@@ -2830,7 +3312,19 @@ class WebHandler(BaseHTTPRequestHandler):
                 # url-test/fallback/load-balance groups are usually "node pickers", not rule targets.
                 # Only show rule count for select groups to reduce noise.
                 if gtype == "select":
-                    badge = f"<span class='pill' title='该分组命中的规则条数'>{int(rules_cnt or 0)} 条规则</span>"
+                    oc = override_counts.get(gname, {}) if isinstance(override_counts, dict) else {}
+                    add_cnt = int(oc.get("add", 0) or 0)
+                    del_cnt = int(oc.get("del", 0) or 0)
+                    base_cnt = int(rules_cnt or 0)
+                    if add_cnt or del_cnt:
+                        disp_cnt = base_cnt + add_cnt + del_cnt
+                        label = f"{disp_cnt} 条规则(增{add_cnt}删{del_cnt})"
+                    else:
+                        label = f"{base_cnt} 条规则"
+                    badge = (
+                        f"<button type='button' class='pill rule-pill' data-group='{html.escape(gname, quote=True)}' "
+                        "title='点击编辑该分组规则'>" + html.escape(label) + "</button>"
+                    )
                 group_cards.append(
                     "<section class=\"card group-card\">"
                     f"<div class=\"row-head\"><span>{html.escape(gname)}</span>{badge}</div>"
