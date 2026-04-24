@@ -3776,16 +3776,39 @@ def run_servers():
             super().__init__(server_address, handler_class)
             self.config = cfg_mgr
 
-    web_srv = WebServer((web_host, web_port), WebHandler)
+    class IPv6WebServer(WebServer):
+        address_family = socket.AF_INET6
+
+        def server_bind(self):
+            if hasattr(socket, "IPV6_V6ONLY"):
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            super().server_bind()
+
+    web_servers = [WebServer((web_host, web_port), WebHandler)]
+    if web_host in ("0.0.0.0", ""):
+        try:
+            web_servers.append(IPv6WebServer(("::", web_port), WebHandler))
+        except OSError as e:
+            print(f"[WEB] IPv6 listen skipped: {e}")
 
     print(f"[DNS] listening on {listen_host}:{dns_port}")
     print(f"[WEB] open http://{web_host}:{web_port} to manage rules")
+    if len(web_servers) > 1:
+        print(f"[WEB] open http://[::]:{web_port} to manage rules")
+    web_threads = [
+        threading.Thread(target=web_srv.serve_forever, daemon=True)
+        for web_srv in web_servers
+    ]
     try:
-        web_srv.serve_forever()
+        for web_thread in web_threads:
+            web_thread.start()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         print("Shutting down...")
     finally:
-        web_srv.server_close()
+        for web_srv in web_servers:
+            web_srv.server_close()
         executor.shutdown(wait=False)
         dns_sock.close()
 
