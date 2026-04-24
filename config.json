@@ -34,5 +34,6 @@
     "8.8.8.8"
   ],
   "clash_profile_source": "local",
-  "clash_rule_overrides": {}
+  "clash_rule_overrides": {},
+  "availability_probe_interval_sec": 300
 }

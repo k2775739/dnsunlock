@@ -71,10 +71,18 @@ DEFAULT_CONFIG = {
     "upstream_dns": "8.8.8.8",
     "upstream_dns_pool": ["1.1.1.1", "8.8.8.8"],
     "ip_pool": ["1.1.1.1", "8.8.8.8", "9.9.9.9"],
+    "availability_probe_interval_sec": 60,
 }
 
 IP_INFO_SITES = ("netvigator", "ifconfig")
-DEFAULT_URLTEST_URL = "http://www.gstatic.com/generate_204"
+DEFAULT_URLTEST_URL = "https://www.gstatic.com/generate_204"
+AVAILABILITY_RETENTION_SEC = 30 * 24 * 60 * 60
+AVAILABILITY_RANGE_SPECS = {
+    "1d": {"seconds": 24 * 60 * 60, "bucket": 60 * 60},
+    "7d": {"seconds": 7 * 24 * 60 * 60, "bucket": 24 * 60 * 60},
+    "30d": {"seconds": 30 * 24 * 60 * 60, "bucket": 24 * 60 * 60},
+}
+IP_META_CACHE_TTL_SEC = 4 * 60 * 60
 DEFAULT_LOCAL_POLICY_TEXT = """[custom]
 ; 本地 Clash 策略（ACL4SSR 风格）
 ; 你可以在 Web 面板里点击“编辑本地配置”修改本文件。
@@ -224,14 +232,14 @@ def _fetch_ip_meta_netvigator(ip: str, timeout: float = 6.0) -> dict:
         return {"ok": False, "ip": ip, "source": "netvigator"}
 
 
-def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, int]:
+def probe_url_latency(ip: str, url: str, timeout: float = 4.0, cache_ttl_sec: Optional[int] = None) -> Tuple[bool, int]:
     """Probe the given URL by forcing DNS resolve to the provided IP.
 
     This approximates Clash url-test delay: connect+request total time (ms).
     """
-    # Rate limit: at most once per minute for the same (ip, url).
     key_url = (url or "").strip() or DEFAULT_URLTEST_URL
     key = (str(ip or "").strip(), key_url)
+    ttl = float(cache_ttl_sec if cache_ttl_sec is not None else 4 * 60 * 60)
     now = time.monotonic()
     try:
         cache = probe_url_latency._cache  # type: ignore[attr-defined]
@@ -243,12 +251,10 @@ def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, in
         probe_url_latency._lock = lock    # type: ignore[attr-defined]
     with lock:
         rec = cache.get(key)
-        if isinstance(rec, dict) and now - float(rec.get("ts", 0)) < 60.0:
+        if isinstance(rec, dict) and now - float(rec.get("ts", 0)) < ttl:
             return bool(rec.get("ok")), int(rec.get("ms") or 0)
 
     if not is_valid_ip(ip):
-        with lock:
-            cache[key] = {"ok": False, "ms": 0, "ts": now}
         return False, 0
     effective_url = (url or "").strip()
     u = urlparse(effective_url)
@@ -258,8 +264,6 @@ def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, in
         u = urlparse(effective_url)
         host = u.hostname
     if not host:
-        with lock:
-            cache[key] = {"ok": False, "ms": 0, "ts": now}
         return False, 0
     scheme = (u.scheme or "http").lower()
     port = u.port or (443 if scheme == "https" else 80)
@@ -295,7 +299,7 @@ def probe_url_latency(ip: str, url: str, timeout: float = 4.0) -> Tuple[bool, in
     except Exception:
         ms = int((time.monotonic() - start) * 1000)
         with lock:
-            cache[key] = {"ok": False, "ms": int(ms), "ts": now}
+            cache.pop(key, None)
         return False, ms
 
 
@@ -430,6 +434,42 @@ def ensure_config():
         pool_list = list(DEFAULT_CONFIG["ip_pool"])
     if cfg.get("ip_pool") != pool_list:
         cfg["ip_pool"] = pool_list
+        dirty = True
+
+    # Normalize availability probe interval
+    try:
+        interval = int(cfg.get("availability_probe_interval_sec", DEFAULT_CONFIG["availability_probe_interval_sec"]))
+    except Exception:
+        interval = DEFAULT_CONFIG["availability_probe_interval_sec"]
+    if interval < 60:
+        interval = 60
+    if cfg.get("availability_probe_interval_sec") != interval:
+        cfg["availability_probe_interval_sec"] = interval
+        dirty = True
+
+    # Normalize per-target availability enabled flags
+    availability_enabled = cfg.get("availability_enabled")
+    if not isinstance(availability_enabled, dict):
+        availability_enabled = {}
+        dirty = True
+    for target_type in ("ip", "upstream_dns"):
+        bucket = availability_enabled.get(target_type)
+        if not isinstance(bucket, dict):
+            availability_enabled[target_type] = {}
+            dirty = True
+            continue
+        normalized_bucket = {}
+        for key, val in bucket.items():
+            ip_s = str(key or "").strip()
+            if not is_valid_ip(ip_s):
+                dirty = True
+                continue
+            normalized_bucket[ip_s] = bool(val)
+        if bucket != normalized_bucket:
+            availability_enabled[target_type] = normalized_bucket
+            dirty = True
+    if cfg.get("availability_enabled") != availability_enabled:
+        cfg["availability_enabled"] = availability_enabled
         dirty = True
 
     if dirty:
@@ -607,6 +647,72 @@ def _validate_remote_url(url: str) -> str:
     with _URL_SAFETY_LOCK:
         _URL_SAFETY_CACHE[key] = {"ok": True, "ts": now, "ips": ips}
     return u
+
+
+def _availability_safe_name(ip: str) -> str:
+    return re.sub(r"[^0-9A-Fa-f_.-]", "_", str(ip or "").strip()) or "_"
+
+
+def _availability_history_dir(cfg: dict, target_type: str) -> Path:
+    cache_dir = Path(_cache_dir_from_cfg(cfg))
+    suffix = "upstream" if str(target_type) == "upstream_dns" else "ip"
+    path = cache_dir / "availability" / suffix
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _availability_history_path(cfg: dict, target_type: str, ip: str) -> Path:
+    return _availability_history_dir(cfg, target_type) / f"{_availability_safe_name(ip)}.jsonl"
+
+
+def _iter_availability_records(path: Path, since_ts: Optional[int] = None):
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                ts = int(rec.get("ts") or 0)
+                if since_ts and ts < since_ts:
+                    continue
+                yield {
+                    "ts": ts,
+                    "ok": bool(rec.get("ok")),
+                    "latency_ms": int(rec.get("latency_ms") or 0),
+                }
+    except Exception:
+        return
+
+
+def _bucket_label(ts: int, bucket_sec: int, total_sec: int) -> str:
+    fmt = "%m-%d %H:%M" if total_sec <= 24 * 60 * 60 else "%m-%d"
+    return time.strftime(fmt, time.localtime(ts))
+
+
+def _empty_availability_detail(target_type: str, ip: str, range_key: str, enabled: bool = True) -> dict:
+    spec = AVAILABILITY_RANGE_SPECS.get(range_key) or AVAILABILITY_RANGE_SPECS["1d"]
+    normalized = range_key if range_key in AVAILABILITY_RANGE_SPECS else "1d"
+    return {
+        "target_type": target_type,
+        "ip": ip,
+        "range": normalized,
+        "availability_enabled": bool(enabled),
+        "online_rate": None,
+        "success_count": 0,
+        "failure_count": 0,
+        "total_count": 0,
+        "avg_latency_ms": None,
+        "last_latency_ms": None,
+        "last_checked_at": None,
+        "bucket_seconds": int(spec["bucket"]),
+        "points": [],
+    }
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1665,6 +1771,229 @@ class ConfigManager:
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2)
 
+    def is_availability_enabled(self, target_type: str, ip: str) -> bool:
+        target_key = "upstream_dns" if str(target_type) == "upstream_dns" else "ip"
+        ip = str(ip or "").strip()
+        if not is_valid_ip(ip):
+            return True
+        with self.lock:
+            bucket = ((self.config.get("availability_enabled") or {}).get(target_key) or {})
+            if not isinstance(bucket, dict):
+                return True
+            return bool(bucket.get(ip, True))
+
+    def set_availability_enabled(self, target_type: str, ip: str, enabled: bool) -> bool:
+        target_key = "upstream_dns" if str(target_type) == "upstream_dns" else "ip"
+        ip = str(ip or "").strip()
+        if not is_valid_ip(ip):
+            return False
+        with self.lock:
+            cfg_map = self.config.get("availability_enabled")
+            if not isinstance(cfg_map, dict):
+                cfg_map = {"ip": {}, "upstream_dns": {}}
+            bucket = cfg_map.get(target_key)
+            if not isinstance(bucket, dict):
+                bucket = {}
+            if bucket.get(ip, True) == bool(enabled):
+                return False
+            bucket[ip] = bool(enabled)
+            cfg_map[target_key] = bucket
+            self.config["availability_enabled"] = cfg_map
+            self.save()
+        return True
+
+    def _resolve_availability_target(self, target_type: str, ip: str) -> Tuple[str, bool]:
+        target_key = "upstream_dns" if str(target_type) == "upstream_dns" else "ip"
+        ip = str(ip or "").strip()
+        if not is_valid_ip(ip):
+            return target_key, False
+        with self.lock:
+            pool = set(self.config.get("upstream_dns_pool", []) if target_key == "upstream_dns" else self.config.get("ip_pool", []))
+        return target_key, ip in pool
+
+    def _record_availability_result(self, target_type: str, ip: str, ok: bool, latency_ms: int, ts: Optional[int] = None):
+        target_key = "upstream_dns" if str(target_type) == "upstream_dns" else "ip"
+        ip = str(ip or "").strip()
+        if not ip or not is_valid_ip(ip) or not self.is_availability_enabled(target_key, ip):
+            return None
+        now_ts = int(ts if ts is not None else time.time())
+        latency_i = max(0, int(latency_ms or 0))
+        rec = {"ts": now_ts, "ok": bool(ok), "latency_ms": latency_i}
+        with self.lock:
+            cfg_copy = dict(self.config)
+        path = _availability_history_path(cfg_copy, target_key, ip)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            return None
+        self._prune_availability_history(path, now_ts=now_ts)
+        return rec
+
+    def _prune_availability_history(self, path: Path, now_ts: Optional[int] = None):
+        cutoff = int((now_ts if now_ts is not None else time.time()) - AVAILABILITY_RETENTION_SEC)
+        try:
+            records = list(_iter_availability_records(path, since_ts=cutoff))
+        except Exception:
+            return
+        if not path.exists():
+            return
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as f:
+                for rec in records:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            os.replace(str(tmp), str(path))
+        except Exception:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+
+    def _availability_window_stats(self, target_type: str, ip: str, seconds: int) -> dict:
+        target_key = "upstream_dns" if str(target_type) == "upstream_dns" else "ip"
+        ip = str(ip or "").strip()
+        enabled = self.is_availability_enabled(target_key, ip)
+        if not ip or not is_valid_ip(ip):
+            return {
+                "availability_enabled": enabled,
+                "online_rate": None,
+                "success_count": 0,
+                "failure_count": 0,
+                "total_count": 0,
+                "avg_latency_ms": None,
+                "last_latency_ms": None,
+                "last_checked_at": None,
+                "last_ok": None,
+            }
+        now_ts = int(time.time())
+        cutoff = now_ts - int(seconds)
+        with self.lock:
+            cfg_copy = dict(self.config)
+        path = _availability_history_path(cfg_copy, target_key, ip)
+        records = list(_iter_availability_records(path, since_ts=cutoff) or [])
+        if not records:
+            return {
+                "availability_enabled": enabled,
+                "online_rate": None,
+                "success_count": 0,
+                "failure_count": 0,
+                "total_count": 0,
+                "avg_latency_ms": None,
+                "last_latency_ms": None,
+                "last_checked_at": None,
+                "last_ok": None,
+            }
+        success_count = sum(1 for rec in records if rec.get("ok"))
+        total_count = len(records)
+        failure_count = total_count - success_count
+        ok_latencies = [int(rec.get("latency_ms") or 0) for rec in records if rec.get("ok")]
+        last = records[-1]
+        avg_latency_ms = int(round(sum(ok_latencies) / len(ok_latencies))) if ok_latencies else None
+        return {
+            "availability_enabled": enabled,
+            "online_rate": round(success_count / total_count, 4) if total_count else None,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "total_count": total_count,
+            "avg_latency_ms": avg_latency_ms,
+            "last_latency_ms": int(last.get("latency_ms") or 0),
+            "last_checked_at": int(last.get("ts") or 0) or None,
+            "last_ok": bool(last.get("ok")),
+        }
+
+    def get_availability_summary(self) -> dict:
+        with self.lock:
+            cfg_copy = dict(self.config)
+            ip_pool = list(cfg_copy.get("ip_pool", []))
+        payload = {"ip": {}, "upstream_dns": {}}
+        for ip in ip_pool:
+            stats_1d = self._availability_window_stats("ip", ip, AVAILABILITY_RANGE_SPECS["1d"]["seconds"])
+            stats_7d = self._availability_window_stats("ip", ip, AVAILABILITY_RANGE_SPECS["7d"]["seconds"])
+            stats_30d = self._availability_window_stats("ip", ip, AVAILABILITY_RANGE_SPECS["30d"]["seconds"])
+            payload["ip"][ip] = {
+                "availability_enabled": stats_1d.get("availability_enabled", True),
+                "online_rate_1d": stats_1d.get("online_rate"),
+                "online_rate_7d": stats_7d.get("online_rate"),
+                "online_rate_30d": stats_30d.get("online_rate"),
+                "last_ok": stats_1d.get("last_ok"),
+                "last_latency_ms": stats_1d.get("last_latency_ms"),
+                "last_checked_at": stats_1d.get("last_checked_at"),
+            }
+        return payload
+
+    def get_availability_detail(self, target_type: str, ip: str, range_key: str) -> dict:
+        if str(target_type) == "upstream_dns":
+            return _empty_availability_detail("upstream_dns", ip, range_key, enabled=False)
+        target_key, exists = self._resolve_availability_target(target_type, ip)
+        enabled = self.is_availability_enabled(target_key, ip)
+        if not exists:
+            return _empty_availability_detail(target_key, ip, range_key, enabled=enabled)
+        spec = AVAILABILITY_RANGE_SPECS.get(range_key) or AVAILABILITY_RANGE_SPECS["1d"]
+        normalized = range_key if range_key in AVAILABILITY_RANGE_SPECS else "1d"
+        now_ts = int(time.time())
+        cutoff = now_ts - int(spec["seconds"])
+        bucket_sec = int(spec["bucket"])
+        with self.lock:
+            cfg_copy = dict(self.config)
+        path = _availability_history_path(cfg_copy, target_key, ip)
+        records = list(_iter_availability_records(path, since_ts=cutoff) or [])
+        if not records:
+            return _empty_availability_detail(target_key, ip, normalized, enabled=enabled)
+        success_count = 0
+        total_count = 0
+        ok_latencies = []
+        points = []
+        for rec in records:
+            ts = int(rec.get("ts") or 0)
+            ok = bool(rec.get("ok"))
+            latency_ms = int(rec.get("latency_ms") or 0)
+            total_count += 1
+            if ok:
+                success_count += 1
+                ok_latencies.append(latency_ms)
+            points.append({
+                "ts": ts,
+                "label": _bucket_label(ts, bucket_sec, int(spec["seconds"])),
+                "ok": ok,
+                "latency_ms": latency_ms,
+            })
+        last = records[-1]
+        return {
+            "target_type": target_key,
+            "ip": ip,
+            "range": normalized,
+            "availability_enabled": bool(enabled),
+            "online_rate": round(success_count / total_count, 4) if total_count else None,
+            "success_count": success_count,
+            "failure_count": total_count - success_count,
+            "total_count": total_count,
+            "avg_latency_ms": int(round(sum(ok_latencies) / len(ok_latencies))) if ok_latencies else None,
+            "last_latency_ms": int(last.get("latency_ms") or 0),
+            "last_checked_at": int(last.get("ts") or 0) or None,
+            "bucket_seconds": bucket_sec,
+            "points": points,
+        }
+
+    def sample_availability_once(self):
+        with self.lock:
+            ip_pool = list(self.config.get("ip_pool", []))
+        for ip in ip_pool:
+            if not self.is_availability_enabled("ip", ip):
+                continue
+            ok, latency_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0)
+            self._record_availability_result("ip", ip, ok, latency_ms)
+
+    def get_availability_probe_interval(self) -> int:
+        with self.lock:
+            try:
+                interval = int(self.config.get("availability_probe_interval_sec", DEFAULT_CONFIG["availability_probe_interval_sec"]))
+            except Exception:
+                interval = DEFAULT_CONFIG["availability_probe_interval_sec"]
+        return max(60, interval)
+
     def update_ip_pool(self, ip_pool, upstream_dns, upstream_pool):
         with self.lock:
             old_pool = list(self.config.get("ip_pool", []))
@@ -2353,6 +2682,20 @@ class ConfigManager:
             return ("ip", final)
         return ("upstream", upstream_dns)
 
+    def _get_cached_ip_meta(self, ip: str, site: str):
+        with self.lock:
+            if self.ip_meta_site_cached != site:
+                return None
+            cached = self.ip_meta_cache.get(ip)
+            fetched_at = float(self.ip_meta_fetched_at or 0)
+        if not isinstance(cached, dict):
+            return None
+        if not cached.get("real_ip"):
+            return None
+        if time.time() - fetched_at >= IP_META_CACHE_TTL_SEC:
+            return None
+        return dict(cached)
+
     def get_ip_meta(self, force=False):
         """Return IP meta info dict ip->meta.
 
@@ -2363,16 +2706,17 @@ class ConfigManager:
         with self.lock:
             pool = list(self.config.get("ip_pool", []))
             site = (self.config.get("ip_info_site") or DEFAULT_CONFIG.get("ip_info_site") or "netvigator").strip().lower()
-            cached = dict(self.ip_meta_cache) if (not force and self.ip_meta_site_cached == site) else {}
         meta = {}
         for ip in pool:
-            if not force and ip in cached and isinstance(cached.get(ip), dict):
-                info = dict(cached[ip])
+            cached = None if force else self._get_cached_ip_meta(ip, site)
+            if isinstance(cached, dict):
+                info = cached
             else:
                 info = fetch_ip_meta(ip, site=site)
                 if not isinstance(info, dict):
                     info = {}
-            lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0)
+            lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0, cache_ttl_sec=self.get_availability_probe_interval())
+            self._record_availability_result("ip", ip, lat_ok, lat_ms)
             if "meta_ok" not in info:
                 info["meta_ok"] = bool(info.get("ok"))
             info["ok"] = bool(lat_ok)
@@ -2399,14 +2743,15 @@ class ConfigManager:
         now = time.time()
         with self.lock:
             site = (self.config.get("ip_info_site") or DEFAULT_CONFIG.get("ip_info_site") or "netvigator").strip().lower()
-            cached = self.ip_meta_cache.get(ip) if (not force and self.ip_meta_site_cached == site) else None
-        if not force and isinstance(cached, dict):
-            meta = dict(cached)
+        cached = None if force else self._get_cached_ip_meta(ip, site)
+        if isinstance(cached, dict):
+            meta = cached
         else:
             meta = fetch_ip_meta(ip, site=site)
             if not isinstance(meta, dict):
                 meta = {}
-        lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0)
+        lat_ok, lat_ms = probe_url_latency(ip, DEFAULT_URLTEST_URL, timeout=4.0, cache_ttl_sec=self.get_availability_probe_interval())
+        self._record_availability_result("ip", ip, lat_ok, lat_ms)
         if "meta_ok" not in meta:
             meta["meta_ok"] = bool(meta.get("ok"))
         meta["ok"] = bool(lat_ok)
@@ -2904,6 +3249,17 @@ class WebHandler(BaseHTTPRequestHandler):
             else:
                 meta = self.cfg.get_ip_meta(force=force)
             return self._send(200, json.dumps(meta).encode("utf-8"), "application/json")
+        if path.endswith("api/availability_summary"):
+            payload = self.cfg.get_availability_summary()
+            return self._send(200, json.dumps(payload).encode("utf-8"), "application/json")
+        if path.endswith("api/availability_detail"):
+            target_type = (qs.get("target_type", ["ip"])[0] or "ip").strip().lower()
+            ip = (qs.get("ip", [""])[0] or "").strip()
+            range_key = (qs.get("range", ["1d"])[0] or "1d").strip().lower()
+            payload = self.cfg.get_availability_detail(target_type, ip, range_key)
+            return self._send(200, json.dumps(payload).encode("utf-8"), "application/json")
+        if path.endswith("api/availability_toggle"):
+            return self._send(405, b"Method Not Allowed", "text/plain; charset=utf-8")
         if path.endswith("api/rules_info"):
             _, snap = self.cfg.get_snapshot()
             info = {
@@ -3131,6 +3487,24 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.cfg.set_clash_group_selected(group, val)
 
             self.cfg.update_ip_pool(new_ip_pool, new_upstream_dns, new_upstream_pool)
+        if path.endswith("api/availability_toggle"):
+            target_type = (data.get("target_type", ["ip"])[0] or "ip").strip().lower()
+            if target_type == "upstream_dns":
+                self._send(400, b"Bad Request: upstream_dns availability is disabled", "text/plain; charset=utf-8")
+                return
+            ip = (data.get("ip", [""])[0] or "").strip()
+            enabled_raw = (data.get("enabled", ["1"])[0] or "1").strip().lower()
+            enabled = enabled_raw in ("1", "true", "on", "yes")
+            changed = self.cfg.set_availability_enabled(target_type, ip, enabled)
+            payload = {
+                "ok": True,
+                "changed": changed,
+                "target_type": "ip",
+                "ip": ip,
+                "availability_enabled": self.cfg.is_availability_enabled(target_type, ip),
+            }
+            self._send(200, json.dumps(payload).encode("utf-8"), "application/json")
+            return
         elif path.endswith("save_group_rules"):
             group = (data.get("group", [""])[0] or "").strip()
             if not group:
@@ -3363,6 +3737,16 @@ class WebHandler(BaseHTTPRequestHandler):
         )
 
 
+def availability_worker(cfg: ConfigManager):
+    while True:
+        try:
+            cfg.sample_availability_once()
+        except Exception:
+            pass
+        interval = cfg.get_availability_probe_interval()
+        time.sleep(interval)
+
+
 # ---------- Server bootstrap ----------
 def run_servers():
     cfg_mgr = ConfigManager(CONFIG_PATH)
@@ -3381,6 +3765,10 @@ def run_servers():
         target=dns_worker, args=(dns_sock, cfg_mgr, executor), daemon=True
     )
     dns_thread.start()
+    availability_thread = threading.Thread(
+        target=availability_worker, args=(cfg_mgr,), daemon=True
+    )
+    availability_thread.start()
 
     class WebServer(ThreadingHTTPServer):
         daemon_threads = True

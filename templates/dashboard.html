@@ -317,7 +317,172 @@
       justify-content: center;
       font-size: 14px;
     }
+    .chip.clickable { cursor: pointer; }
+    .chip-content {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .chip-title {
+      font-weight: 600;
+      line-height: 1.3;
+      word-break: break-all;
+      padding-right: 10px;
+    }
+    .chip-meta {
+      font-size: 12px;
+      opacity: 0.92;
+      line-height: 1.35;
+      word-break: break-all;
+    }
+    .chip-rate {
+      font-size: 11px;
+      opacity: 0.82;
+      line-height: 1.3;
+    }
+    .detail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .range-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .range-tab.active {
+      background: #dff3ff;
+      border-color: #8bc7ff;
+      color: #0b5ea8;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .stat-card {
+      border: 1px solid rgba(210, 220, 235, 0.72);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(245,249,255,0.96));
+      padding: 12px 14px;
+      box-shadow: 0 10px 24px rgba(38, 79, 140, 0.06);
+      backdrop-filter: blur(12px);
+    }
+    .stat-label {
+      display: block;
+      color: #7b8597;
+      font-size: 12px;
+      margin-bottom: 6px;
+      letter-spacing: 0.01em;
+    }
+    .stat-value {
+      font-size: 19px;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      color: #1f2b3d;
+    }
+    .chart-wrap {
+      border: 1px solid rgba(210, 220, 235, 0.7);
+      border-radius: 18px;
+      padding: 14px 14px 12px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(246,249,255,0.95));
+      box-shadow: 0 18px 40px rgba(37, 78, 138, 0.08);
+      backdrop-filter: blur(14px);
+    }
+    .chart-wrap svg {
+      width: 100%;
+      height: 260px;
+      display: block;
+      overflow: visible;
+    }
+    .chart-empty {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 30px 0;
+      text-align: center;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border: 1px solid rgba(210, 220, 235, 0.72);
+      border-radius: 16px;
+      padding: 12px 14px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(246,249,255,0.95));
+      box-shadow: 0 10px 24px rgba(38, 79, 140, 0.05);
+      margin-bottom: 12px;
+    }
+    .toggle-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .toggle-copy small {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 48px;
+      height: 28px;
+      flex-shrink: 0;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      inset: 0;
+      cursor: pointer;
+      background: #c9d2df;
+      transition: .2s;
+      border-radius: 999px;
+    }
+    .slider:before {
+      content: "";
+      position: absolute;
+      height: 22px;
+      width: 22px;
+      left: 3px;
+      top: 3px;
+      background: white;
+      transition: .2s;
+      border-radius: 50%;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.16);
+    }
+    .switch input:checked + .slider {
+      background: #0f7bff;
+    }
+    .switch input:checked + .slider:before {
+      transform: translateX(20px);
+    }
+    .chip-action {
+      margin-top: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid currentColor;
+      border-radius: 10px;
+      padding: 2px 8px;
+      font-size: 11px;
+      background: rgba(255,255,255,0.35);
+      cursor: pointer;
+      width: fit-content;
+    }
+    .chart-caption {
+      margin-top: 10px;
+      color: #7b8597;
+      font-size: 12px;
+      letter-spacing: 0.01em;
+    }
     #local-policy-text { min-height: 52vh; }
+
     #toast {
       position: fixed;
       top: 16px;
@@ -473,6 +638,46 @@
         </div>
       </section>
     </div>
+    <div class="modal" id="ip-availability-modal" aria-hidden="true">
+      <section class="card modal-card">
+        <div class="detail-head">
+          <div>
+            <div style="font-weight:600;font-size:18px;" id="ip-availability-title">IP 在线率详情</div>
+            <div style="color:var(--muted);font-size:13px;margin-top:4px;" id="ip-availability-subtitle">加载中...</div>
+          </div>
+          <button type="button" class="ghost-btn" id="ip-availability-close">关闭</button>
+        </div>
+        <div class="range-tabs" style="margin-bottom:12px;">
+          <button type="button" class="ghost-btn range-tab active" data-range="1d">一天</button>
+          <button type="button" class="ghost-btn range-tab" data-range="7d">一周</button>
+          <button type="button" class="ghost-btn range-tab" data-range="30d">一月</button>
+        </div>
+        <div class="toggle-row">
+          <div class="toggle-copy">
+            <strong>在线记录</strong>
+            <small id="availability-toggle-help">开启后持续记录在线率；关闭后停止检测并保留历史数据。</small>
+          </div>
+          <label class="switch" title="在线记录开关">
+            <input type="checkbox" id="availability-enabled-toggle" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-card"><span class="stat-label">在线率</span><span class="stat-value" id="detail-online-rate">-</span></div>
+          <div class="stat-card"><span class="stat-label">成功 / 总次数</span><span class="stat-value" id="detail-success-total">-</span></div>
+          <div class="stat-card"><span class="stat-label">平均延迟</span><span class="stat-value" id="detail-avg-latency">-</span></div>
+          <div class="stat-card"><span class="stat-label">最近延迟</span><span class="stat-value" id="detail-last-latency">-</span></div>
+        </div>
+        <div class="chart-wrap">
+          <svg id="availability-chart" viewBox="0 0 760 260" preserveAspectRatio="none"></svg>
+          <div class="chart-empty" id="availability-chart-empty" style="display:none;">暂无足够历史数据</div>
+          <div class="chart-caption" id="availability-chart-caption">蓝线表示延迟，红点表示失败/超时。</div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="ip-availability-cancel">关闭</button>
+        </div>
+      </section>
+    </div>
 	  <script>
     // Toast
     const toast = document.createElement('div');
@@ -486,6 +691,218 @@
     }
 
     window.activeUpstream = '${upstream_dns}';
+    window.__availabilitySummary = { ip: {}, upstream_dns: {} };
+    window.__ipAvailabilityState = { ip: '', targetType: 'ip', range: '1d' };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch] || ch));
+    }
+
+    function formatRate(value) {
+      return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '--';
+    }
+
+    function formatLatency(value) {
+      return Number.isFinite(value) ? `${Math.round(value)}ms` : '--';
+    }
+
+    function formatTime(ts) {
+      if (!Number.isFinite(ts) || ts <= 0) return '--';
+      const d = new Date(ts * 1000);
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getMonth() + 1}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function renderChipMarkup(ip, title, meta, rateText, actionText='') {
+      const action = actionText ? `<button type="button" class="chip-action" data-chip-action="set-active">${escapeHtml(actionText)}</button>` : '';
+      return `<div class="chip-content"><span class="chip-title">${escapeHtml(title)}</span><span class="chip-meta">${escapeHtml(meta || '')}</span><span class="chip-rate">${escapeHtml(rateText || '')}</span>${action}</div>`;
+    }
+
+    function setChipPending(chip) {
+      if (!chip) return;
+      const ip = chip.dataset.ip || '';
+      const actionText = chip.dataset.targetType === 'upstream_dns' ? '设为当前' : '';
+      chip.innerHTML = renderChipMarkup(ip, ip, '探测中', '在线率 --', actionText);
+    }
+
+    function applyAvailabilitySummary(prefix, ip, summary) {
+      const chip = document.querySelector(`#chip-list-${prefix} .chip[data-ip="${ip}"]`);
+      if (!chip) return;
+      chip.dataset.rate1d = Number.isFinite(summary?.online_rate_1d) ? String(summary.online_rate_1d) : '';
+      chip.dataset.rate7d = Number.isFinite(summary?.online_rate_7d) ? String(summary.online_rate_7d) : '';
+      chip.dataset.rate30d = Number.isFinite(summary?.online_rate_30d) ? String(summary.online_rate_30d) : '';
+      chip.dataset.lastOk = summary && summary.last_ok ? '1' : '0';
+      chip.dataset.lastLatency = Number.isFinite(summary?.last_latency_ms) ? String(summary.last_latency_ms) : '';
+      chip.dataset.lastCheckedAt = Number.isFinite(summary?.last_checked_at) ? String(summary.last_checked_at) : '';
+      chip.dataset.availabilityEnabled = summary && summary.availability_enabled === false ? '0' : '1';
+    }
+
+    async function refreshAvailabilitySummary() {
+      try {
+        const res = await fetch(`./api/availability_summary?${token_query}`);
+        const data = await res.json();
+        window.__availabilitySummary = data || { ip: {}, upstream_dns: {} };
+        Object.entries(window.__availabilitySummary.ip || {}).forEach(([ip, summary]) => applyAvailabilitySummary('ip', ip, summary));
+        Object.entries(window.__availabilitySummary.upstream_dns || {}).forEach(([ip, summary]) => applyAvailabilitySummary('dns', ip, summary));
+        if (window.__ipMetaCache) {
+          Object.entries(window.__ipMetaCache).forEach(([ip, info]) => applyIpMeta(ip, info));
+        }
+        applyDnsSummary();
+      } catch (_) {
+        // ignore summary refresh failures
+      }
+    }
+
+    function applyDnsSummary() {
+      document.querySelectorAll('#chip-list-dns .chip').forEach(chip => {
+        const ip = chip.dataset.ip || '';
+        const title = `${ip} · ${ipVersionLabel(ip)}`;
+        chip.innerHTML = renderChipMarkup(ip, title, '上游 DNS', '点击设为当前');
+        chip.classList.remove('ok', 'fail');
+      });
+    }
+
+    function applyDetailStats(detail) {
+      const typeLabel = '出口 IP';
+      document.getElementById('detail-online-rate').textContent = formatRate(detail?.online_rate);
+      document.getElementById('detail-success-total').textContent = `${detail?.success_count ?? 0} / ${detail?.total_count ?? 0}`;
+      document.getElementById('detail-avg-latency').textContent = formatLatency(detail?.avg_latency_ms);
+      document.getElementById('detail-last-latency').textContent = formatLatency(detail?.last_latency_ms);
+      document.getElementById('ip-availability-title').textContent = `${detail?.ip || ''} 在线率详情`;
+      document.getElementById('ip-availability-subtitle').textContent = `${typeLabel} · ${detail?.last_checked_at ? `最近探测：${formatTime(detail.last_checked_at)}` : '暂无历史探测'}`;
+      const toggle = document.getElementById('availability-enabled-toggle');
+      if (toggle) toggle.checked = detail?.availability_enabled !== false;
+      const help = document.getElementById('availability-toggle-help');
+      if (help) {
+        help.textContent = detail?.availability_enabled === false
+          ? '当前已关闭在线记录，不再检测；历史数据仅供查看。'
+          : '开启后持续记录在线率；关闭后停止检测并保留历史数据。';
+      }
+    }
+
+
+    function renderAvailabilityChart(detail) {
+      const svg = document.getElementById('availability-chart');
+      const empty = document.getElementById('availability-chart-empty');
+      const caption = document.getElementById('availability-chart-caption');
+      const points = Array.isArray(detail?.points) ? detail.points : [];
+      if (!points.length) {
+        svg.innerHTML = '';
+        empty.style.display = 'block';
+        if (caption) caption.textContent = '蓝线表示延迟，红点表示失败/超时。';
+        return;
+      }
+      empty.style.display = 'none';
+      if (caption) caption.textContent = '蓝线表示延迟，红点表示失败/超时。';
+      const width = 760;
+      const height = 260;
+      const padL = 48;
+      const padR = 18;
+      const padT = 18;
+      const padB = 36;
+      const chartW = width - padL - padR;
+      const chartH = height - padT - padB;
+      const step = points.length > 1 ? chartW / (points.length - 1) : 0;
+      const successVals = points.map(p => (p.ok && Number.isFinite(p.latency_ms)) ? p.latency_ms : null).filter(v => v !== null);
+      const maxLatency = Math.max(...(successVals.length ? successVals : [1]), 1);
+      const topMs = Math.ceil(maxLatency / 50) * 50;
+      const tickValues = Array.from(new Set([0, Math.round(topMs / 3), Math.round(topMs * 2 / 3), topMs].map(v => Math.max(0, Math.round(v / 10) * 10)))).sort((a,b) => a - b);
+      const pointPos = points.map((p, idx) => {
+        const x = padL + (points.length > 1 ? idx * step : chartW / 2);
+        const hasLatency = p.ok && Number.isFinite(p.latency_ms);
+        const y = hasLatency ? (padT + chartH - (p.latency_ms / topMs) * chartH) : padT + 10;
+        const failed = !p.ok;
+        return {x, y, failed, point: p};
+      });
+      let path = '';
+      let areaPath = '';
+      const successPoints = pointPos.filter(item => !item.failed && Number.isFinite(item.point.latency_ms));
+      successPoints.forEach((item, idx) => {
+        path += `${idx ? ' L' : 'M'} ${item.x.toFixed(2)} ${item.y.toFixed(2)}`;
+      });
+      if (successPoints.length) {
+        areaPath = `${path} L ${successPoints[successPoints.length - 1].x.toFixed(2)} ${(padT + chartH).toFixed(2)} L ${successPoints[0].x.toFixed(2)} ${(padT + chartH).toFixed(2)} Z`;
+      }
+      const dots = pointPos.map(item => {
+        if (item.failed) {
+          return `<circle cx="${item.x.toFixed(2)}" cy="${item.y.toFixed(2)}" r="4" fill="#ff5f57" /><line x1="${item.x.toFixed(2)}" y1="${padT}" x2="${item.x.toFixed(2)}" y2="${(padT + 16).toFixed(2)}" stroke="#ffb0ac" stroke-width="2" stroke-linecap="round" />`;
+        }
+        return `<circle cx="${item.x.toFixed(2)}" cy="${item.y.toFixed(2)}" r="2.6" fill="#2f80ff" stroke="#ffffff" stroke-width="1.2" />`;
+      }).join('');
+      const tickLines = tickValues.map(v => {
+        const y = padT + chartH - (v / topMs) * chartH;
+        return `<line x1="${padL}" y1="${y.toFixed(2)}" x2="${(width - padR).toFixed(2)}" y2="${y.toFixed(2)}" stroke="rgba(175,188,210,0.28)" stroke-width="1" />\n                <text x="8" y="${(y + 4).toFixed(2)}" fill="#8a93a3" font-size="11">${v}ms</text>`;
+      }).join('');
+      const labelsIdx = Array.from(new Set([0, Math.floor(points.length / 2), points.length - 1])).filter(i => i >= 0 && i < points.length);
+      const labels = labelsIdx.map(i => {
+        const item = pointPos[i];
+        return `<text x="${item.x.toFixed(2)}" y="${(height - 10).toFixed(2)}" text-anchor="middle" fill="#8a93a3" font-size="11">${escapeHtml(item.point.label || '')}</text>`;
+      }).join('');
+      svg.innerHTML = `
+        <defs>
+          <linearGradient id="latencyAreaFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="rgba(47,128,255,0.22)" />
+            <stop offset="100%" stop-color="rgba(47,128,255,0.02)" />
+          </linearGradient>
+        </defs>
+        ${tickLines}
+        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + chartH}" stroke="rgba(175,188,210,0.35)" stroke-width="1" />
+        <line x1="${padL}" y1="${padT + chartH}" x2="${width - padR}" y2="${padT + chartH}" stroke="rgba(175,188,210,0.35)" stroke-width="1" />
+        ${areaPath ? `<path d="${areaPath}" fill="url(#latencyAreaFill)" />` : ''}
+        ${path ? `<path d="${path}" fill="none" stroke="#2f80ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />` : ''}
+        ${dots}
+        ${labels}
+      `;
+    }
+
+    async function updateAvailabilityToggle(enabled) {
+      const p = new URLSearchParams();
+      p.set('target_type', window.__ipAvailabilityState.targetType || 'ip');
+      p.set('ip', window.__ipAvailabilityState.ip || '');
+      p.set('enabled', enabled ? '1' : '0');
+      try {
+        const res = await fetch(`./api/availability_toggle?${token_query}`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: p.toString(),
+        });
+        if (!res.ok) throw new Error('toggle failed');
+        await refreshAvailabilitySummary();
+        await loadAvailabilityDetail(window.__ipAvailabilityState.targetType, window.__ipAvailabilityState.ip, window.__ipAvailabilityState.range, false);
+      } catch (_) {
+        showToast('在线记录切换失败');
+      }
+    }
+
+    async function loadAvailabilityDetail(targetType, ip, rangeKey, updateState=true) {
+      const subtitle = document.getElementById('ip-availability-subtitle');
+      subtitle.textContent = '加载中...';
+      if (updateState) {
+        window.__ipAvailabilityState.targetType = targetType || 'ip';
+        window.__ipAvailabilityState.ip = ip || '';
+        window.__ipAvailabilityState.range = rangeKey || '1d';
+      }
+      try {
+        const res = await fetch(`./api/availability_detail?${token_query}&target_type=${encodeURIComponent(targetType || 'ip')}&ip=${encodeURIComponent(ip)}&range=${encodeURIComponent(rangeKey)}`);
+        const detail = await res.json();
+        applyDetailStats(detail || {});
+        renderAvailabilityChart(detail || {});
+      } catch (_) {
+        subtitle.textContent = '加载失败';
+        renderAvailabilityChart({ points: [] });
+      }
+    }
+
+    const ipAvailabilityModal = document.getElementById('ip-availability-modal');
+    function openAvailabilityModal(targetType, ip) {
+      if (!ip) return;
+      window.__ipAvailabilityState.targetType = targetType || 'ip';
+      window.__ipAvailabilityState.ip = ip;
+      document.querySelectorAll('.range-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.range === window.__ipAvailabilityState.range));
+      ipAvailabilityModal?.classList.add('show');
+      ipAvailabilityModal?.setAttribute('aria-hidden', 'false');
+      loadAvailabilityDetail('ip', ip, window.__ipAvailabilityState.range, false);
+    }
 
     function setupChipManager(prefix) {
       const list = document.getElementById('chip-list-' + prefix);
@@ -493,6 +910,7 @@
       const delBtn = document.getElementById('delete-selected-' + prefix);
       const addBtn = document.getElementById('add-' + prefix);
       const input = document.getElementById(prefix + '-input');
+      const targetType = prefix === 'dns' ? 'upstream_dns' : 'ip';
       let edit = false;
       function setEdit(on) {
         edit = on;
@@ -527,12 +945,16 @@
         if (!chip) return;
         if (edit) {
           chip.classList.toggle('selected');
-        } else if (prefix === 'dns') {
+          return;
+        }
+        if (prefix === 'dns') {
           list.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
           chip.classList.add('active');
           window.activeUpstream = chip.dataset.ip;
           submitUpstreamDnsOnly();
+          return;
         }
+        openAvailabilityModal('ip', chip.dataset.ip || '');
       });
       addBtn.addEventListener('click', () => {
         const val = (input.value || '').trim();
@@ -540,9 +962,10 @@
         if (!isValidIp(val)) { showToast('请输入合法IP'); return; }
         if (![...list.querySelectorAll('.chip')].some(c => c.dataset.ip === val)) {
           const span = document.createElement('span');
-          span.className = 'chip';
+          span.className = 'chip clickable';
           span.dataset.ip = val;
-          span.textContent = formatBaseIpLabel(val);
+          span.dataset.targetType = targetType;
+          span.innerHTML = renderChipMarkup(val, `${val} · ${ipVersionLabel(val)}`, prefix === 'dns' ? '上游 DNS' : '等待探测', prefix === 'dns' ? '点击设为当前' : '在线率 --');
           if (prefix === 'dns' && !window.activeUpstream) {
             span.classList.add('active');
             window.activeUpstream = val;
@@ -564,20 +987,42 @@
     const getDns = setupChipManager('dns');
 
     function applyVersionToChips(listSelector, force=false) {
+      const isDns = listSelector === '#chip-list-dns';
       document.querySelectorAll(`${listSelector} .chip`).forEach(chip => {
         const ip = (chip.dataset.ip || '').trim() || chip.textContent.trim();
         if (!ip) return;
+        chip.classList.add('clickable');
+        chip.dataset.targetType = isDns ? 'upstream_dns' : 'ip';
         if (force || chip.textContent.trim() === ip.trim()) {
-          chip.textContent = formatBaseIpLabel(ip);
+          chip.innerHTML = renderChipMarkup(ip, `${ip} · ${ipVersionLabel(ip)}`, isDns ? '上游 DNS' : '等待探测', isDns ? '点击设为当前' : '在线率 --');
         }
       });
     }
     applyVersionToChips('#chip-list-ip');
     applyVersionToChips('#chip-list-dns', true);
+    applyDnsSummary();
+
+    function closeIpAvailabilityModal() {
+      ipAvailabilityModal?.classList.remove('show');
+      ipAvailabilityModal?.setAttribute('aria-hidden', 'true');
+    }
 
     document.getElementById('refresh-ipinfo')?.addEventListener('click', () => refreshIpMeta(true));
-
-    // IP 探测站点选择
+    document.getElementById('ip-availability-close')?.addEventListener('click', closeIpAvailabilityModal);
+    document.getElementById('ip-availability-cancel')?.addEventListener('click', closeIpAvailabilityModal);
+    document.getElementById('availability-enabled-toggle')?.addEventListener('change', (e) => {
+      updateAvailabilityToggle(!!e.target.checked);
+    });
+    ipAvailabilityModal?.addEventListener('click', (e) => { if (e.target === ipAvailabilityModal) closeIpAvailabilityModal(); });
+    document.querySelectorAll('.range-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        window.__ipAvailabilityState.range = btn.dataset.range || '1d';
+        document.querySelectorAll('.range-tab').forEach(item => item.classList.toggle('active', item === btn));
+        if (window.__ipAvailabilityState.ip) {
+          loadAvailabilityDetail(window.__ipAvailabilityState.targetType, window.__ipAvailabilityState.ip, window.__ipAvailabilityState.range, false);
+        }
+      });
+    });
     const ipInfoSiteSel = document.getElementById('ipinfo-site');
     if (ipInfoSiteSel) {
       const currentSite = ('${ip_info_site}' || 'netvigator').toLowerCase();
@@ -674,6 +1119,7 @@
     const initialIpMeta = ${ip_meta_json};
     if (initialIpMeta && Object.keys(initialIpMeta).length) {
       Object.entries(initialIpMeta).forEach(([ip, info]) => applyIpMeta(ip, info));
+      refreshAvailabilitySummary();
     } else {
       window.addEventListener('load', () => setTimeout(() => refreshIpMeta(true), 300));
     }
@@ -927,14 +1373,17 @@
     function applyIpMeta(ip, info) {
       window.__ipMetaCache = window.__ipMetaCache || {};
       window.__ipMetaCache[ip] = info;
-      const dispMs = (info && Number.isFinite(info.ms)) ? Math.round(info.ms / 2) : null;
+      const summary = (window.__availabilitySummary?.ip || {})[ip] || {};
+      const paused = summary.availability_enabled === false;
+      const dispMs = (info && Number.isFinite(info.ms)) ? Math.round(info.ms) : null;
       const ipVer = ipVersionLabel(ip);
       const realIp = (info && info.real_ip && info.real_ip !== ip) ? info.real_ip : '';
       const realVer = realIp ? ipVersionLabel(realIp) : '';
-      // 更新 IP 池芯片
       const chip = document.querySelector(`#chip-list-ip .chip[data-ip="${ip}"]`);
       if (chip) {
         chip.classList.remove('ok','fail');
+        chip.classList.add('clickable');
+        let metaText = `等待探测 · ${ipVer}`;
         if (info && info.ok) {
           chip.classList.add('ok');
           const parts = [];
@@ -946,15 +1395,14 @@
           } else {
             parts.push(ipVer);
           }
-          const extra = parts.length ? ` · ${parts.join(' / ')}` : '';
-          chip.textContent = `${ip}${extra}`;
-        } else {
+          metaText = parts.join(' / ') || metaText;
+        } else if (info && ('ok' in info)) {
           chip.classList.add('fail');
-          const msPart = (dispMs !== null) ? ` · ${dispMs}ms` : '';
-          chip.textContent = `${ip}${msPart} · ${ipVer} · 错误`;
+          metaText = `${dispMs !== null ? `${dispMs}ms / ` : ''}${ipVer} / 错误`;
         }
+        const rateText = paused ? `在线记录已关闭 · 1天 ${formatRate(summary.online_rate_1d)}` : `1天 ${formatRate(summary.online_rate_1d)} · 7天 ${formatRate(summary.online_rate_7d)}`;
+        chip.innerHTML = renderChipMarkup(ip, ip, metaText, rateText);
       }
-      // 同步更新所有下拉选项的显示与颜色
       document.querySelectorAll(`select option[value="${ip}"]`).forEach(opt => {
         if (opt.value === "__upstream__") return;
         const GREEN = '#0f7b31';
@@ -992,10 +1440,7 @@
     async function refreshIpMeta(force=false) {
       const chips = Array.from(document.querySelectorAll('#chip-list-ip .chip'));
       if (force) {
-        chips.forEach(c => {
-          c.classList.remove('ok','fail');
-          c.textContent = `${c.dataset.ip} · 探测中`;
-        });
+        chips.forEach(setChipPending);
         showToast('正在刷新 IP 探测...');
       }
       const tasks = chips.map(chip => {
@@ -1006,7 +1451,12 @@
           .catch(() => applyIpMeta(ip, {ok:false}));
       });
       if (tasks.length) {
-        Promise.allSettled(tasks).then(() => refreshGroupSection());
+        Promise.allSettled(tasks).then(async () => {
+          await refreshAvailabilitySummary();
+          refreshGroupSection();
+        });
+      } else {
+        refreshAvailabilitySummary();
       }
     }
     refreshIpMeta();
